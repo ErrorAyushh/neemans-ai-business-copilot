@@ -1,8 +1,6 @@
 """
 charts.py
 
-Production-ready Plotly visualizations for Neeman's AI Business Copilot.
-
 Architecture:
     analytics/metrics.py
             ↓
