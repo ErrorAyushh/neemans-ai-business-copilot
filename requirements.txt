@@ -2,7 +2,11 @@ streamlit
 pandas
 numpy
 plotly
-python-dotenv
 langchain
-langchain-groq
+langchain-core
 langgraph
+langchain-sarvam
+sarvamai
+python-dotenv
+pydantic
+typing-extensions
