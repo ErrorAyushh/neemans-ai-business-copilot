@@ -1,0 +1,19 @@
+Neeman's AI Business Copilot — Synthetic Dataset
+
+All data in this folder is synthetic and created solely for the internship assignment.
+
+Files:
+- products.csv: Product master data.
+- sales.csv: Synthetic order-level sales transactions.
+- inventory.csv: Daily product inventory snapshots.
+- marketing.csv: Daily marketing campaign/channel performance.
+
+Embedded business scenario:
+- January–June generally show improving/healthy performance.
+- July contains a deliberate performance deterioration.
+- Running category demand weakens in July.
+- Running inventory availability is intentionally pressured.
+- Meta marketing ROAS deteriorates in July.
+- These signals allow the RCA Agent to investigate multiple plausible contributing factors.
+
+No real Neeman's proprietary data is used.
