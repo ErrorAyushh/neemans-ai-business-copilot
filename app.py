@@ -24,9 +24,6 @@ from datetime import date
 
 import pandas as pd
 import streamlit as st
-
-SARVAM_API_KEY = st.secrets["SARVAM_API_KEY"]
-
 import charts
 from analytics import metrics
 
