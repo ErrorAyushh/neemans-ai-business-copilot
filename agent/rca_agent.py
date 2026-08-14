@@ -12,8 +12,59 @@ notes are both accurate per docs.sarvam.ai. The LangGraph tool-calling
 architecture is otherwise unchanged: agent -> tools -> mandatory ->
 synthesize graph, same AIMessage.tool_calls / ToolMessage protocol.
 
+WHAT CHANGED IN THIS VERSION
+------------------------------------------------------------------------
+Three regressions from a previous hardening pass had crept back in, found
+by actually re-reading the code rather than trusting prior comments:
 
+1. FIXED (again): `_collect_signals` now breaks ties by absolute magnitude
+   of change, then a fixed dimension priority — not by trace insertion
+   order. Two runs with identical evidence always rank identically.
+2. FIXED (again): `_deterministic_fallback` now checks whether ANY
+   dimension tool succeeded (`_any_dimension_tool_succeeded`), independent
+   of whether compare_sales_kpis ran. A narrow question (e.g. "why did
+   category performance change?") whose only evidence is WEAK no longer
+   gets misreported as "not enough evidence".
+3. ADDED: `get_strongest_signal(trace)` — a single deterministic function,
+   exposed as `result.strongest_signal`. Previously app.py maintained its
+   own separate copy of this logic that (incorrectly) included WEAK
+   signals, while confidence only counts STRONG/MODERATE — a real,
+   user-visible inconsistency (the "Strongest Signal" card could show a
+   WEAK result while the confidence badge said "no strong signal found").
+   app.py should now read `result.strongest_signal` instead of
+   recomputing it.
 
+NEWLY INTEGRATED: the period-context system prompt (previously an
+unwired draft) is now the actual SYSTEM_PROMPT, built by
+`_build_system_prompt()`. `run_investigation()` accepts optional
+`current_period` / `comparison_period` dicts — the exact shape
+`metrics.resolve_named_period()` already returns
+(`{"start_date", "end_date", "label"}`) — so the UI's sidebar selection
+can be passed straight through with no reshaping. When omitted, the
+prompt falls back to telling the model to resolve periods itself from the
+question text, preserving the old free-text-only behavior.
+
+Because the prompt now promises "Confidence is determined by the
+application... never infer it yourself", confidence has to reach the
+model BEFORE it writes its final answer, not just be computed afterward
+for the UI. `_mandatory_evidence_node` now computes deterministic
+confidence immediately after dimension evidence is collected and tells
+the model to use that exact value — this covers every path that can lead
+to a final answer (the model's own natural completion AND the forced
+synthesis fallback), not just the synthesis-only path.
+
+Design guarantees (unchanged):
+- Business metrics and signal strength come only from analytics tools.
+- Required dimension evidence is enforced deterministically after a
+  successful revenue KPI comparison.
+- The same resolved periods are reused for all mandatory evidence.
+- Numeric claims are grounded against current-investigation evidence.
+- AI output is rejected/falls back if numeric grounding fails.
+- An identical (tool, args) request is never executed twice.
+- The whole graph is retried at most once, and ONLY if no tool has
+  executed yet — once any tool has run, a failure goes straight to the
+  deterministic fallback rather than duplicating analytics work.
+"""
 
 import json
 import os
@@ -32,7 +83,14 @@ from langchain_sarvam import ChatSarvam, ChatSarvamError
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 
-from agent.tools import DATASET_END_DATE, TOOLS
+# NOTE: DATASET_END_DATE lives in agent.tools, not analytics.metrics.
+# analytics/metrics.py is a stateless function library (every function
+# takes a dataframe as a parameter; nothing is loaded at import time).
+# agent/tools.py is the layer that actually loads the dataset once, at
+# import time, and derives DATASET_END_DATE from that loaded dataframe —
+# so it is the single authoritative source for this constant. Importing
+# it from analytics.metrics instead was the root cause of the ImportError.
+from agent.tools import TOOLS, DATASET_END_DATE
 from agent.intent_router import (
     DIRECT_ANALYTICS_INTENTS,
     Intent,
@@ -1715,7 +1773,7 @@ def _run_direct_analytics(
 
 # ============================================================
 # MAIN INVESTIGATION
-# ============================================================
+
 
 def run_investigation(
     question: str,
