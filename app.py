@@ -10,7 +10,7 @@ directly on the dashboard pages), and every chart comes from charts.py.
 Architecture:
 
     CSV -> analytics/metrics.py -> agent/tools.py -> RCA agent (LangGraph
-    + Groq) -> app.py -> charts.py / Plotly -> Streamlit UI
+    + Sarvam AI) -> app.py -> charts.py / Plotly -> Streamlit UI
 
 app.py does NOT recalculate revenue, percentage changes, ROAS, inventory
 changes, or evidence strength, and does NOT compute month/period
@@ -24,6 +24,7 @@ from datetime import date
 
 import pandas as pd
 import streamlit as st
+
 import charts
 from analytics import metrics
 
@@ -47,45 +48,285 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .block-container { max-width: 1400px; padding-top: 1.5rem; padding-bottom: 3rem; }
+    :root {
+        --ink: #0f172a;
+        --muted: #64748b;
+        --line: #e2e8f0;
+        --surface: #ffffff;
+        --surface-soft: #f8fafc;
+        --brand: #4f46e5;
+        --brand-soft: #eef2ff;
+        --success-soft: #ecfdf5;
+        --warning-soft: #fffbeb;
+        --danger-soft: #fef2f2;
+    }
 
-    .main-title { font-size: 2.1rem; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 0.1rem; }
-    .subtitle { color: #64748b; margin-bottom: 1.4rem; font-size: 0.95rem; }
-    .section-title { font-size: 1.25rem; font-weight: 700; margin-top: 0.6rem; margin-bottom: 0.2rem; }
-    .muted { color: #64748b; font-size: 0.88rem; }
+    .stApp {
+        background:
+            radial-gradient(circle at 8% 0%, rgba(79,70,229,.07), transparent 28rem),
+            radial-gradient(circle at 92% 8%, rgba(14,165,233,.05), transparent 24rem),
+            #f8fafc;
+    }
+
+    .block-container {
+        max-width: 1420px;
+        padding-top: 1.35rem;
+        padding-bottom: 3.5rem;
+    }
+
+    [data-testid="stSidebar"] {
+        border-right: 1px solid var(--line);
+        background: rgba(255,255,255,.96);
+    }
+
+    [data-testid="stSidebar"] > div:first-child {
+        padding-top: 1.1rem;
+    }
+
+    .main-title {
+        font-size: 2.15rem;
+        font-weight: 850;
+        letter-spacing: -0.04em;
+        color: var(--ink);
+        margin-bottom: .1rem;
+    }
+
+    .subtitle {
+        color: var(--muted);
+        margin-bottom: 1.35rem;
+        font-size: .95rem;
+    }
+
+    .section-title {
+        font-size: 1.28rem;
+        font-weight: 780;
+        letter-spacing: -.02em;
+        color: var(--ink);
+        margin-top: .7rem;
+        margin-bottom: .25rem;
+    }
+
+    .muted {
+        color: var(--muted);
+        font-size: .88rem;
+    }
+
+    .brand-card {
+        padding: 16px 15px;
+        border: 1px solid #dbeafe;
+        border-radius: 16px;
+        background: linear-gradient(145deg, #eef2ff 0%, #f8fafc 72%);
+        box-shadow: 0 8px 25px rgba(15,23,42,.05);
+        margin-bottom: 10px;
+    }
+
+    .brand-name {
+        font-weight: 820;
+        font-size: 1.02rem;
+        color: var(--ink);
+        line-height: 1.2;
+    }
+
+    .brand-sub {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: .78rem;
+        line-height: 1.45;
+    }
+
+    .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 10px;
+        padding: 5px 9px;
+        border-radius: 999px;
+        background: #ffffff;
+        border: 1px solid var(--line);
+        color: #334155;
+        font-size: .72rem;
+        font-weight: 700;
+    }
 
     .signal {
-        padding: 14px 16px; border: 1px solid #e2e8f0; border-radius: 12px;
-        margin-bottom: 10px; background: #ffffff;
+        padding: 16px 18px;
+        border: 1px solid var(--line);
+        border-radius: 15px;
+        margin-bottom: 11px;
+        background: rgba(255,255,255,.88);
+        box-shadow: 0 5px 20px rgba(15,23,42,.035);
     }
-    .signal-title { font-weight: 700; margin-bottom: 4px; font-size: 0.92rem; }
-    .signal-body { color: #475569; line-height: 1.5; font-size: 0.9rem; }
 
-    .kpi-caption { color: #64748b; font-size: 0.82rem; margin-top: -0.6rem; }
+    .signal-title {
+        font-weight: 760;
+        margin-bottom: 5px;
+        font-size: .94rem;
+        color: var(--ink);
+    }
+
+    .signal-body {
+        color: #475569;
+        line-height: 1.55;
+        font-size: .9rem;
+    }
+
+    .kpi-caption {
+        color: var(--muted);
+        font-size: .82rem;
+        margin-top: -.6rem;
+    }
 
     .rca-card {
-        padding: 16px 18px; border-radius: 14px; border: 1px solid #e2e8f0;
-        background: #ffffff; box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04); min-height: 100px;
+        padding: 17px 18px;
+        border-radius: 15px;
+        border: 1px solid var(--line);
+        background: rgba(255,255,255,.94);
+        box-shadow: 0 6px 22px rgba(15,23,42,.045);
+        min-height: 104px;
     }
+
     .rca-card-label {
-        color: #64748b; font-size: 0.78rem; font-weight: 650;
-        text-transform: uppercase; letter-spacing: 0.03em;
+        color: var(--muted);
+        font-size: .75rem;
+        font-weight: 720;
+        text-transform: uppercase;
+        letter-spacing: .055em;
     }
-    .rca-card-value { font-size: 1.4rem; font-weight: 800; margin-top: 5px; color: #0f172a; }
-    .rca-card-sub { color: #64748b; font-size: 0.82rem; margin-top: 3px; }
+
+    .rca-card-value {
+        font-size: 1.42rem;
+        font-weight: 840;
+        margin-top: 6px;
+        color: var(--ink);
+        line-height: 1.2;
+    }
+
+    .rca-card-sub {
+        color: var(--muted);
+        font-size: .81rem;
+        margin-top: 5px;
+    }
 
     .confidence-badge {
-        display: inline-block; padding: 4px 12px; border-radius: 999px;
-        font-weight: 700; font-size: 0.78rem; letter-spacing: 0.02em;
+        display: inline-flex;
+        align-items: center;
+        padding: 5px 11px;
+        border-radius: 999px;
+        font-weight: 760;
+        font-size: .76rem;
+        letter-spacing: .025em;
     }
+
     .confidence-high { background: #dcfce7; color: #166534; }
     .confidence-medium { background: #fef3c7; color: #92400e; }
     .confidence-low { background: #fee2e2; color: #991b1b; }
     .confidence-unknown { background: #f1f5f9; color: #475569; }
+
+    .rca-question-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 8px;
+    }
+
+    .rca-question-title {
+        font-size: 1.02rem;
+        font-weight: 780;
+        color: var(--ink);
+    }
+
+    .period-chip {
+        display: inline-block;
+        padding: 5px 9px;
+        border-radius: 999px;
+        background: var(--brand-soft);
+        color: #3730a3;
+        font-size: .74rem;
+        font-weight: 720;
+        white-space: nowrap;
+    }
+
+    div[data-testid="stButton"] > button {
+        border-radius: 10px;
+        border: 1px solid #dbe2ea;
+        font-weight: 650;
+        transition: all .15s ease;
+    }
+
+    div[data-testid="stButton"] > button:hover {
+        border-color: #a5b4fc;
+        color: #3730a3;
+        box-shadow: 0 5px 14px rgba(79,70,229,.10);
+    }
+
+    div[data-testid="stButton"] > button[kind="primary"] {
+        border: 0;
+        background: linear-gradient(135deg, #4f46e5, #6366f1);
+        box-shadow: 0 8px 18px rgba(79,70,229,.22);
+    }
+
+    div[data-testid="stTextArea"] textarea {
+        border-radius: 13px;
+        border: 1px solid #cbd5e1;
+        background: rgba(255,255,255,.96);
+        font-size: .94rem;
+        line-height: 1.55;
+    }
+
+    div[data-testid="stTextArea"] textarea:focus {
+        border-color: #818cf8;
+        box-shadow: 0 0 0 2px rgba(99,102,241,.12);
+    }
+
+    div[data-testid="stMetric"] {
+        background: rgba(255,255,255,.78);
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        padding: 10px 13px;
+    }
+
+    .trace-summary {
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface-soft);
+        color: #475569;
+        font-size: .83rem;
+    }
+
+    .error-panel {
+        padding: 14px 16px;
+        border-radius: 13px;
+        border: 1px solid #fecaca;
+        background: var(--danger-soft);
+        color: #7f1d1d;
+        margin: 8px 0 12px;
+    }
+
+    .success-panel {
+        padding: 10px 13px;
+        border-radius: 11px;
+        border: 1px solid #bbf7d0;
+        background: var(--success-soft);
+        color: #166534;
+        font-size: .84rem;
+    }
+
+    .sidebar-caption {
+        color: var(--muted);
+        font-size: .76rem;
+        line-height: 1.45;
+    }
+
+    hr {
+        border-color: var(--line) !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
 
 
 # =============================================================================
@@ -217,8 +458,19 @@ def resolve_period(label: str) -> dict:
 # =============================================================================
 
 with st.sidebar:
-    st.markdown("## 🧠 Neeman's AI Business Copilot")
-    st.caption("AI-powered retail analytics • RCA powered by LangGraph + Groq")
+    st.markdown(
+        """
+        <div class="brand-card">
+            <div class="brand-name">🧠 Neeman's AI Business Copilot</div>
+            <div class="brand-sub">
+                Evidence-based retail analytics with deterministic metrics and
+                Sarvam-powered RCA.
+            </div>
+            <div class="status-pill">● Analytics ready</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.divider()
 
@@ -275,7 +527,7 @@ with st.sidebar:
 
 st.markdown('<div class="main-title">Neeman\'s AI Business Copilot</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">AI-powered retail analytics • RCA powered by LangGraph + Groq</div>',
+    '<div class="subtitle">AI-powered retail analytics • RCA powered by LangGraph + Sarvam AI</div>',
     unsafe_allow_html=True,
 )
 
@@ -560,34 +812,14 @@ elif page == "Root Cause Analysis":
                     return result["pct_change"], result["period_a"]["value"], result["period_b"]["value"]
         return None, None, None
 
-    def extract_strongest_signal(trace: list) -> dict | None:
-        """Scan every dimension actually investigated and surface the single
-        strongest signal_strength result — INSUFFICIENT never qualifies as
-        "strongest", it means there was nothing conclusive to report."""
-        strength_rank = {"STRONG": 3, "MODERATE": 2, "WEAK": 1}
-        best, best_rank = None, 0
-
-        def consider(dimension: str, label: str, change, strength: str | None):
-            nonlocal best, best_rank
-            rank = strength_rank.get(strength, 0)
-            if rank > best_rank:
-                best, best_rank = {"dimension": dimension, "label": label, "change": change, "strength": strength}, rank
-
-        for step in trace:
-            tool, result = step["tool"], step["result"]
-            if tool == "compare_category_performance":
-                for r in result.get("categories", []):
-                    consider("Category", r["category"], r.get("revenue_change_pct"), r.get("signal_strength"))
-            elif tool == "compare_channel_performance":
-                for r in result.get("channels", []):
-                    consider("Channel", r["channel"], r.get("revenue_change_pct"), r.get("signal_strength"))
-            elif tool == "compare_marketing_performance":
-                for r in result.get("channels", []):
-                    consider("Marketing", r["channel"], r.get("attributed_revenue_change_pct"), r.get("signal_strength"))
-            elif tool == "compare_inventory_performance" and result.get("status") == "ok":
-                consider("Inventory", "Availability / stockouts", result.get("availability_change_pct_points"), result.get("signal_strength"))
-
-        return best
+    def extract_result_signal(result) -> dict | None:
+        """
+        Use the RCA agent's canonical deterministic strongest signal.
+        The agent explicitly exposes result.strongest_signal so the UI does
+        not maintain a second, potentially inconsistent ranking implementation.
+        """
+        signal = getattr(result, "strongest_signal", None)
+        return signal if isinstance(signal, dict) else None
 
     def extract_confidence(sections: dict) -> str:
         match = re.search(r"\b(HIGH|MEDIUM|LOW)\b", sections.get("Confidence", ""), flags=re.IGNORECASE)
@@ -649,13 +881,16 @@ elif page == "Root Cause Analysis":
     section("Root Cause Analysis", "Ask the AI Copilot why a business metric changed.")
 
     st.markdown(
-        """
-        <div class="signal" style="background: linear-gradient(135deg, #f8fafc, #eef2ff); border-color:#cbd5e1;">
-            <div class="signal-title">🧠 Evidence-based RCA</div>
+        f"""
+        <div class="signal" style="background:linear-gradient(135deg,#ffffff 0%,#eef2ff 100%);border-color:#c7d2fe;">
+            <div class="rca-question-header">
+                <div class="rca-question-title">🧠 Evidence-based Root Cause Analysis</div>
+                <div class="period-chip">{COMPARISON_LABEL} → {CURRENT_LABEL}</div>
+            </div>
             <div class="signal-body">
-                The agent investigates using dedicated analytical tools and produces an
-                evidence-backed diagnosis, with every evidence-strength label computed
-                deterministically by pandas — never judged by the LLM.
+                Sarvam AI interprets evidence returned by deterministic analytics tools.
+                Business calculations and evidence-strength labels remain controlled by
+                pandas, not the language model.
             </div>
         </div>
         """,
@@ -686,16 +921,41 @@ elif page == "Root Cause Analysis":
     )
 
     if st.button("🔎 Investigate", type="primary", use_container_width=True):
-        if not question.strip():
+        clean_question = question.strip()
+
+        if not clean_question:
             st.warning("Please enter an investigation question.")
         else:
             try:
+                # Lazy import keeps the dashboard pages independent from the
+                # Sarvam/RCA stack, while still surfacing a useful import error
+                # if the RCA dependency is misconfigured in deployment.
                 from agent.rca_agent import run_investigation
-                with st.spinner("Investigating business performance..."):
-                    st.session_state["last_rca_result"] = run_investigation(question.strip())
-            except Exception:
+
+                with st.spinner("Investigating business performance with Sarvam AI..."):
+                    st.session_state["last_rca_result"] = run_investigation(
+                        clean_question,
+                        current_period=current_resolved,
+                        comparison_period=comparison_resolved,
+                    )
+
+            except Exception as exc:
                 st.session_state["last_rca_result"] = None
-                st.error("RCA investigation could not be completed. Please retry in a moment.")
+
+                # The previous version swallowed the real exception and always
+                # displayed the same generic message. That made deployment
+                # failures indistinguishable from model/tool failures.
+                st.error("RCA investigation could not be started.")
+
+                with st.expander("Technical diagnostic", expanded=True):
+                    st.code(
+                        f"{type(exc).__name__}: {exc}",
+                        language="text",
+                    )
+                    st.caption(
+                        "If this is a deployment issue, check SARVAM_API_KEY, "
+                        "langchain-sarvam, LangGraph, and the agent/tools imports."
+                    )
 
     # -------------------------------------------------------------------------
     # RCA RESULT
@@ -711,24 +971,63 @@ elif page == "Root Cause Analysis":
         trace = getattr(result, "trace", []) or []
         grounding_warning = getattr(result, "grounding_warning", None) or ""
 
-        is_rate_limited = status == "api_error" and any(marker in grounding_warning.lower() for marker in RATE_LIMIT_MARKERS)
+        is_rate_limited = (
+            status == "model_rate_limited"
+            or any(marker in grounding_warning.lower() for marker in RATE_LIMIT_MARKERS)
+        )
 
         if status == "no_api_key":
-            st.info("No GROQ_API_KEY is configured, so the agent can't run live. Add it to your `.env` file to enable investigations.")
+            st.error(
+                "SARVAM_API_KEY is not configured. Add SARVAM_API_KEY to your "
+                ".env/secrets configuration and restart the app."
+            )
+        elif status == "auth_error":
+            st.error(
+                "Sarvam authentication failed. Verify that SARVAM_API_KEY is "
+                "correct, active, and available to the running process."
+            )
         elif is_rate_limited:
-            st.warning("AI investigation is temporarily unavailable because the model rate limit has been reached. Please try again later.")
-        elif status in ("synthesis_fallback", "api_error"):
-            st.warning("The analytics data was available, but the AI reasoning step didn't complete normally. Showing the raw evidence gathered instead.")
+            st.warning(
+                "Sarvam is temporarily rate-limited. The analytics trace is "
+                "preserved when available; please retry after the limit resets."
+            )
+        elif status in ("synthesis_fallback", "api_error", "grounding_failed"):
+            st.warning(
+                "The analytics evidence was collected, but the AI explanation "
+                "did not complete normally. Showing the evidence-backed result."
+            )
+
+        if grounding_warning and status not in ("ok", "model_rate_limited", "auth_error"):
+            with st.expander("Investigation diagnostic"):
+                st.code(grounding_warning, language="text")
 
         if status == "ok" and answer:
             sections = parse_rca_sections(answer)
             revenue_change, _, _ = extract_revenue_change(trace)
-            strongest = extract_strongest_signal(trace)
-            confidence = extract_confidence(sections)
+            strongest = extract_result_signal(result)
+            confidence = getattr(result, "confidence", None) or extract_confidence(sections)
+
+            result_current_period = getattr(result, "current_period", None)
+            result_previous_period = getattr(result, "previous_period", None)
+
+            actual_current_label = (
+                result_current_period.get("label")
+                if isinstance(result_current_period, dict) and result_current_period.get("label")
+                else CURRENT_LABEL
+            )
+            actual_previous_label = (
+                result_previous_period.get("label")
+                if isinstance(result_previous_period, dict) and result_previous_period.get("label")
+                else COMPARISON_LABEL
+            )
 
             c1, c2, c3 = st.columns(3)
             with c1:
-                rca_card("Revenue Change", pct(revenue_change) if revenue_change is not None else "—", f"{COMPARISON_LABEL} → {CURRENT_LABEL}")
+                rca_card(
+                    "Revenue Change",
+                    pct(revenue_change) if revenue_change is not None else "—",
+                    f"{actual_previous_label} → {actual_current_label}",
+                )
             with c2:
                 if strongest:
                     rca_card("Strongest Signal", f"{strongest['dimension']}: {strongest['label']}", f"{strongest['strength']} · {pct(strongest['change'])}")
@@ -805,5 +1104,5 @@ elif page == "Root Cause Analysis":
 st.divider()
 st.caption(
     f"Neeman's AI Business Copilot • Dataset ending {DATASET_END_DATE} "
-    "• Metrics powered by pandas • RCA powered by LangGraph + Groq"
+    "• Metrics powered by pandas • RCA powered by LangGraph + Sarvam AI"
 )
