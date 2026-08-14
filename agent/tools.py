@@ -538,6 +538,16 @@ def compare_marketing_performance(
 # ============================================================
 # TOOL REGISTRY
 # ============================================================
+# This is the ONLY TOOLS assignment in this file. It contains exactly the
+# @tool-decorated functions defined above. rank_months_by_revenue,
+# get_revenue_trend, and get_growth are intentionally NOT included here —
+# they are called directly from analytics.metrics by
+# agent/rca_agent.py's _run_direct_analytics() for the CROSS_PERIOD_RANKING,
+# TIME_SERIES_TREND, and SINGLE_PERIOD_LOOKUP intents, which bypass the LLM
+# tool-calling path entirely. Adding them here would put plain (non-@tool)
+# functions in TOOLS if they aren't separately wrapped, breaking
+# llm.bind_tools(TOOLS) and the `{tool.name: tool for tool in TOOLS}` lookup
+# in agent/rca_agent.py's _tools_node.
 
 TOOLS = [
     # --------------------------------------------------------
