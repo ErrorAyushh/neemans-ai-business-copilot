@@ -15,6 +15,9 @@ Architecture:
 app.py does NOT recalculate revenue, percentage changes, ROAS, inventory
 changes, or evidence strength, and does NOT compute month/period
 boundaries itself — those all come from metrics.resolve_named_period().
+It does NOT recompute the strongest signal or confidence either — those
+come straight from result.strongest_signal / result.confidence, which
+are produced deterministically inside agent/rca_agent.py.
 
 VISUAL IDENTITY
 ----------------
@@ -37,8 +40,34 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+import base64
+from pathlib import Path
+
 import charts
 from analytics import metrics
+
+
+# =============================================================================
+# BRAND ASSETS
+# =============================================================================
+# Loaded once, gracefully. The app must never crash or show a broken-image
+# icon if the logo file isn't present in a given deployment — it simply
+# falls back to the text wordmark that was already there.
+
+_LOGO_PATH = Path(__file__).parent / "assets" / "neemans-logo.jpeg"
+
+
+@st.cache_data(show_spinner=False)
+def _load_logo_data_uri() -> str | None:
+    try:
+        data = _LOGO_PATH.read_bytes()
+    except FileNotFoundError:
+        return None
+    encoded = base64.b64encode(data).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+LOGO_DATA_URI = _load_logo_data_uri()
 
 
 # =============================================================================
@@ -644,9 +673,15 @@ _PAGE_BY_DISPLAY = {v: k for k, v in PAGE_DISPLAY.items()}
 # =============================================================================
 
 with st.sidebar:
+    _logo_img_html = (
+        f'<img src="{LOGO_DATA_URI}" alt="Neeman\'s" '
+        'style="height:54px;width:auto;display:block;margin-bottom:10px;" />'
+        if LOGO_DATA_URI else ""
+    )
     st.markdown(
-        """
+        f"""
         <div class="brand-card">
+            {_logo_img_html}
             <div class="brand-wordmark">NEEMAN'S</div>
             <div class="brand-name">AI Business Copilot</div>
             <div class="brand-sub">
@@ -709,21 +744,70 @@ with st.sidebar:
     )
     st.caption("Dashboard calculations powered by pandas (analytics/metrics.py).")
 
+    # -------------------------------------------------------------------
+    # Developer / debug mode
+    # -------------------------------------------------------------------
+    # Internal implementation details (LangGraph tool trace, raw tool
+    # inputs/outputs, tool-call budget usage, exception detail) are hidden
+    # from normal business users by default and only surface here.
+    st.divider()
+    st.markdown('<div class="panel-eyebrow">Developer</div>', unsafe_allow_html=True)
+    DEBUG_MODE = st.checkbox(
+        "Enable debug mode",
+        value=False,
+        help=(
+            "Shows internal diagnostics: the investigation tool trace, raw "
+            "tool inputs/outputs, and technical exception detail. Intended "
+            "for developers — leave off for normal business use."
+        ),
+    )
+
 
 # =============================================================================
 # HEADER
 # =============================================================================
+# The masthead shows a small cropped emblem/icon (the upper portion of the
+# brand JPEG only) rather than the full logo — the "NEEMAN'S" wordmark
+# underneath the emblem in the source image is clipped via an
+# overflow-hidden wrapper. This is purely a presentational crop of the
+# existing asset; the sidebar logo above is untouched and still renders
+# the full logo with the wordmark.
+
+_masthead_logo_html = (
+    f"""<div style="
+            height:77px;
+            overflow:hidden;
+            flex-shrink:0;
+            display:block;
+            line-height:0;
+        ">
+            <img
+                src="{LOGO_DATA_URI}"
+                alt="Neeman's"
+                style="
+                    height:140px;
+                    width:auto;
+                    display:block;
+                    mix-blend-mode:multiply;
+                "
+            />
+        </div>"""
+    if LOGO_DATA_URI else ""
+)
 
 st.markdown(
     f"""
-    <div class="masthead">
-        <div class="masthead-eyebrow">Evidence-Grounded Retail Analytics</div>
-        <div class="main-title">Neeman's AI Business Copilot</div>
-        <div class="masthead-rule"></div>
-        <div class="masthead-meta">
-            Coverage {DATASET_START_DATE.strftime('%b %Y')} – {DATASET_END_DATE.strftime('%b %Y')}
-            <span class="masthead-dot">•</span>
-            Deterministic analytics, Sarvam-interpreted root cause analysis
+    <div class="masthead" style="display:flex;align-items:center;gap:6px;">
+        {_masthead_logo_html}
+        <div style="flex:1;min-width:0;">
+            <div class="masthead-eyebrow">Evidence-Grounded Retail Analytics</div>
+            <div class="main-title">Neeman's AI Business Copilot</div>
+            <div class="masthead-rule"></div>
+            <div class="masthead-meta">
+                Coverage {DATASET_START_DATE.strftime('%b %Y')} – {DATASET_END_DATE.strftime('%b %Y')}
+                <span class="masthead-dot">•</span>
+                Deterministic analytics, Sarvam-interpreted root cause analysis
+            </div>
         </div>
     </div>
     """,
@@ -1095,7 +1179,7 @@ elif page == "Root Cause Analysis":
         """,
         unsafe_allow_html=True,
     )
-# Every date-sensitive example must explicitly carry the currently
+    # Every date-sensitive example must explicitly carry the currently
     # selected periods (chronologically: comparison -> current), since
     # these questions are otherwise ambiguous to the agent. This list is
     # rebuilt from CURRENT_LABEL / COMPARISON_LABEL on every script rerun,
@@ -1141,20 +1225,23 @@ elif page == "Root Cause Analysis":
             except Exception as exc:
                 st.session_state["last_rca_result"] = None
 
-                # The previous version swallowed the real exception and always
-                # displayed the same generic message. That made deployment
-                # failures indistinguishable from model/tool failures.
-                st.error("RCA investigation could not be started.")
+                # A previous version swallowed the real exception and always
+                # displayed the same generic message, which made deployment
+                # failures indistinguishable from model/tool failures. The
+                # user always gets a plain-language message; the raw
+                # exception is only shown in debug mode.
+                st.error(
+                    "RCA investigation could not be started. Please try again, "
+                    "or contact support if the problem continues."
+                )
 
-                with st.expander("Technical diagnostic", expanded=True):
-                    st.code(
-                        f"{type(exc).__name__}: {exc}",
-                        language="text",
-                    )
-                    st.caption(
-                        "If this is a deployment issue, check SARVAM_API_KEY, "
-                        "langchain-sarvam, LangGraph, and the agent/tools imports."
-                    )
+                if DEBUG_MODE:
+                    with st.expander("Technical diagnostic", expanded=True):
+                        st.code(f"{type(exc).__name__}: {exc}", language="text")
+                        st.caption(
+                            "If this is a deployment issue, check SARVAM_API_KEY, "
+                            "langchain-sarvam, LangGraph, and the agent/tools imports."
+                        )
 
     # -------------------------------------------------------------------------
     # RCA RESULT
@@ -1164,6 +1251,25 @@ elif page == "Root Cause Analysis":
 
     if result:
         st.divider()
+
+        # ---------------------------------------------------------------
+        # Investigation Question — always shown explicitly and first, so
+        # it's never ambiguous which question a displayed result belongs
+        # to. If the text box currently holds a different question than
+        # the one that produced this result (e.g. the user typed a new
+        # question but hasn't clicked Run Investigation yet), that is
+        # called out rather than silently shown as if it were current.
+        # ---------------------------------------------------------------
+        result_question = (getattr(result, "question", "") or "").strip()
+        typed_question = question.strip() if question else ""
+
+        st.markdown('<div class="panel-eyebrow">Investigation Question</div>', unsafe_allow_html=True)
+        st.markdown(f"> {result_question or '—'}")
+        if result_question and typed_question and result_question != typed_question:
+            st.caption(
+                "⚠ This result is for the question above, not the text currently in the "
+                "input box. Click **Run Investigation** to analyze the updated question."
+            )
 
         status = getattr(result, "status", "ok")
         answer = getattr(result, "final_answer", None) or ""
@@ -1196,7 +1302,7 @@ elif page == "Root Cause Analysis":
                 "did not complete normally. Showing the evidence-backed result."
             )
 
-        if grounding_warning and status not in ("ok", "model_rate_limited", "auth_error"):
+        if grounding_warning and status not in ("ok", "model_rate_limited", "auth_error") and DEBUG_MODE:
             with st.expander("Investigation diagnostic"):
                 st.code(grounding_warning, language="text")
 
@@ -1229,7 +1335,22 @@ elif page == "Root Cause Analysis":
                 )
             with c2:
                 if strongest:
-                    rca_card("Strongest Signal", f"{strongest['dimension']}: {strongest['label']}", f"{strongest['strength']} · {pct(strongest['change'])}")
+                    # Inventory's figure is percentage POINTS, not a percent
+                    # change — using pct() for every dimension would silently
+                    # mislabel it. Only category/channel/marketing changes
+                    # are true percent changes.
+                    change_value = strongest.get("change")
+                    if change_value is None:
+                        change_display = "—"
+                    elif strongest["dimension"] == "Inventory":
+                        change_display = f"{change_value:+.2f} pp"
+                    else:
+                        change_display = pct(change_value)
+                    rupee_impact = strongest.get("rupee_impact")
+                    sub = f"{strongest['strength']} · {change_display}"
+                    if rupee_impact is not None:
+                        sub += f" · {money(rupee_impact)} impact"
+                    rca_card("Strongest Signal", f"{strongest['dimension']}: {strongest['label']}", sub)
                 else:
                     rca_card("Strongest Signal", "—", "No conclusive dimension evidence")
             with c3:
@@ -1284,19 +1405,25 @@ elif page == "Root Cause Analysis":
                     unsafe_allow_html=True,
                 )
 
-        # ---- Investigation trace ----
-        st.divider()
-        if trace:
-            with st.expander(f"Investigation Trace — {len(trace)} tool call(s) used"):
-                for i, step in enumerate(trace, start=1):
-                    st.write(f"{i}. `{step.get('tool', 'unknown')}`")
-                st.markdown("---")
-                if st.checkbox("Show tool inputs & outputs", key="rca_trace_details"):
+        # ---- Investigation trace (developer / debug mode only) ----
+        # LangGraph internals, the tool-call budget, and raw tool
+        # inputs/outputs are implementation detail, not something a
+        # business user needs to see to trust the answer — the "Evidence"
+        # expander above already surfaces the evidence itself in readable
+        # form. This stays hidden unless debug mode is explicitly enabled.
+        if DEBUG_MODE:
+            st.divider()
+            if trace:
+                with st.expander(f"Investigation Trace — {len(trace)} tool call(s) used"):
                     for i, step in enumerate(trace, start=1):
-                        st.markdown(f"**{i}. {step.get('tool', 'unknown')}**")
-                        st.json({"input": step.get("input", {}), "result": step.get("result", {})})
-        else:
-            st.info("The agent did not execute any tools.")
+                        st.write(f"{i}. `{step.get('tool', 'unknown')}`")
+                    st.markdown("---")
+                    if st.checkbox("Show tool inputs & outputs", key="rca_trace_details"):
+                        for i, step in enumerate(trace, start=1):
+                            st.markdown(f"**{i}. {step.get('tool', 'unknown')}**")
+                            st.json({"input": step.get("input", {}), "result": step.get("result", {})})
+            else:
+                st.info("The agent did not execute any tools.")
 
 
 # =============================================================================
