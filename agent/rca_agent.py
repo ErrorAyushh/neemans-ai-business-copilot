@@ -1,3 +1,4 @@
+
 """
 agent/rca_agent.py
 
@@ -34,8 +35,130 @@ by actually re-reading the code rather than trusting prior comments:
    app.py should now read `result.strongest_signal` instead of
    recomputing it.
 
-NEWLY INTEGRATED: the period-context system prompt (previously an
-unwired draft) is now the actual SYSTEM_PROMPT, built by
+NEWLY INTEGRATED (this pass): the system prompt now explicitly covers two
+question shapes that the original prompt left implicit:
+
+4. ADDED `_OUT_OF_SCOPE_RULE` — the dataset only covers sales, category,
+   channel, inventory and marketing. Questions that need something else
+   (pricing strategy, competitor data, customer sentiment, macro
+   conditions, staffing, logistics cost, etc.) must be answered with an
+   explicit "the available dataset does not contain..." statement instead
+   of a plausible-sounding but unsupported answer.
+5. ADDED `_BUSINESS_ADVICE_RULE` and response format E (RECOMMENDATION /
+   ADVICE QUESTION) — "what advice would you give management?" style
+   questions now have their own evidence-first structure (observed
+   situation -> strongest evidence -> action -> validation step ->
+   limitation) instead of being force-fit into the general RCA template
+   or answered with generic, evidence-free advice.
+
+Both additions are prompt-only: no analytics, tool, intent-routing, or
+grounding behavior changed at that time. Every constraint from the
+previous version (grounding, deterministic confidence/signal-strength,
+mandatory evidence, tool-call budget/dedup/retry protection, causal-
+language safety) is unchanged below.
+
+WHAT CHANGED IN THIS PASS (found from real test transcripts, not
+hypothetical review):
+
+6. FIXED a real, user-visible inconsistency: the "Strongest Signal" card
+   could name a different dimension than the model's own #1-ranked Root
+   Cause Ranking entry (e.g. card said "Meta -34.77%", ranking led with
+   "Running -30.88%"). Root cause: `_collect_signals` ranked purely by
+   each dimension's own relative percentage change, which compares
+   different bases across dimensions (Meta's ROAS/attributed-revenue base
+   is much smaller than Running's revenue base). Fixed by ranking on
+   absolute RUPEE revenue impact where a rupee figure is available
+   (category: tool-provided absolute_revenue_change; channel/marketing:
+   current-minus-previous revenue, computed here from tool-returned
+   figures only) — putting every dimension on the same footing as the
+   revenue change actually under investigation. Inventory has no revenue-
+   equivalent figure and is never assigned an invented one; it instead
+   ranks below any dimension with a real rupee figure. See
+   `_collect_signals`'s docstring for the full rationale.
+7. FIXED a real gap where mandatory dimension evidence collection was not
+   actually mandatory: `_mandatory_evidence_node` only fires after
+   compare_sales_kpis (or compare_periods on revenue) already appears in
+   the trace, which silently assumed the model would always call it
+   first. A real investigation showed the model calling
+   compare_category_performance directly and never calling
+   compare_sales_kpis — leaving the UI's Revenue Change card blank and
+   only one dimension investigated for a general-scope question. Added
+   `_bootstrap_period_evidence`, which deterministically pre-runs
+   compare_sales_kpis + the required dimension tools for the application-
+   supplied periods BEFORE the model's first turn, whenever
+   current_period/comparison_period are supplied. This does not block the
+   model from separately investigating an explicitly different period the
+   user names — the existing mandatory-evidence path still covers that
+   case, and tool-call deduplication means nothing runs twice.
+8. ADDED `_NO_QUESTION_REWRITING_RULE`: transcripts showed the model's own
+   "## Investigation Question" line inside its answer sometimes restating
+   a different, narrower question than what the user actually typed (e.g.
+   user asked "Give me a root cause analysis of the revenue change." and
+   the answer's Investigation Question line said "Why did revenue
+   decrease from June 2026 to July 2026?"). The UI already displays the
+   true typed question independently (see app.py), but the prompt itself
+   needed an explicit verbatim-reproduction rule.
+9. FIXED a formatting bug in the deterministic (non-LLM) fallback: period
+   ranges and the "from X to Y" separator both used the word "to",
+   producing ambiguous strings like "from 2026-06-01 to 2026-06-30 to
+   2026-07-01 to 2026-07-31". `_period_label` now uses an en dash inside
+   a period's own date range so it's never confused with the separator
+   between the two periods being compared, and includes the period label
+   when available.
+
+WHAT CHANGED IN THIS PASS (diagnosed from a specific reproducible bug
+report — "Which categories contributed the most to the revenue decline"
+intermittently returning the "AI explanation did not complete normally"
+fallback mixed with unrelated Marketing/Inventory/Channel evidence):
+
+10. ROOT-CAUSE FIX in `_classify_scope`: a previous version checked a
+    list of "general" marker words (including the single word "revenue")
+    BEFORE checking for an explicit dimension keyword, and returned all
+    four dimensions immediately on any match. Because "revenue" appears
+    in nearly every RCA question — including narrow ones like "Which
+    CATEGORIES contributed most to the REVENUE decline?" — this silently
+    overrode explicit single-dimension questions on every investigation,
+    not intermittently. It only *looked* intermittent because a full
+    4-dimension answer is longer and more prone to truncation/grounding
+    failure than the correct 1-dimension answer, so re-running the same
+    question sometimes got a shorter, cleaner completion by luck. Fixed
+    by checking dimension keywords first; a question naming exactly one
+    dimension is now always scoped to that dimension alone, regardless of
+    whether "revenue" also appears in it.
+11. Added `allowed_tools` scoping, threaded through `_collect_signals`,
+    `get_strongest_signal`, `_any_dimension_tool_succeeded`, and
+    `_deterministic_confidence`, and applied consistently at every call
+    site in `_bootstrap_period_evidence`, `_mandatory_evidence_node`, and
+    `run_investigation`. The Strongest Signal card, the Confidence badge,
+    and the deterministic fallback text are now always computed from
+    exactly the dimension(s) the question was scoped to — never an
+    unrelated dimension that happened to also appear in the trace.
+12. Added `_format_single_dimension_fallback` + made `_deterministic_fallback`
+    question-aware (`question` parameter): a question scoped to exactly
+    one dimension now gets a dedicated narrative built from that
+    dimension's richest tool-provided fields (e.g. category's own
+    contribution_to_total_change_pct — the correct "how much did each
+    contribute" figure) instead of the generic cross-dimension "strongest
+    observed contributing factors" list, which was designed for
+    general/multi-dimension questions.
+13. Replaced the single one-shot `_retry_with_strict_grounding` (which
+    only handled ungrounded numbers, and did nothing for an empty
+    response — the more common failure in the bug report) with
+    `_synthesize_final_answer` / `_attempt_synthesis_recovery`: a unified,
+    bounded (MAX_SYNTHESIS_RETRIES = 2) retry loop that reuses the SAME
+    already-collected trace evidence for every attempt, never re-runs any
+    analytics tool, and handles both an empty/incomplete response and an
+    ungrounded response through the same recovery path. This is the
+    automated equivalent of the user manually re-running the same
+    question — except bounded, immediate, and evidence-reusing.
+14. Small `_TOOL_EFFICIENCY` prompt addition explicitly telling the model
+    not to call dimension tools outside the question's scope when a
+    SYSTEM NOTE already supplies the relevant evidence — a defense in
+    depth alongside fix #10/#11, since the deterministic scoping now
+    guarantees correct OUTPUT even if the model still over-fetches.
+
+NEWLY INTEGRATED (previous pass): the period-context system prompt
+(previously an unwired draft) is the actual SYSTEM_PROMPT, built by
 `_build_system_prompt()`. `run_investigation()` accepts optional
 `current_period` / `comparison_period` dicts — the exact shape
 `metrics.resolve_named_period()` already returns
@@ -44,14 +167,14 @@ can be passed straight through with no reshaping. When omitted, the
 prompt falls back to telling the model to resolve periods itself from the
 question text, preserving the old free-text-only behavior.
 
-Because the prompt now promises "Confidence is determined by the
+Because the prompt promises "Confidence is determined by the
 application... never infer it yourself", confidence has to reach the
 model BEFORE it writes its final answer, not just be computed afterward
-for the UI. `_mandatory_evidence_node` now computes deterministic
-confidence immediately after dimension evidence is collected and tells
-the model to use that exact value — this covers every path that can lead
-to a final answer (the model's own natural completion AND the forced
-synthesis fallback), not just the synthesis-only path.
+for the UI. `_mandatory_evidence_node` computes deterministic confidence
+immediately after dimension evidence is collected and tells the model to
+use that exact value — this covers every path that can lead to a final
+answer (the model's own natural completion AND the forced synthesis
+fallback), not just the synthesis-only path.
 
 Design guarantees (unchanged):
 - Business metrics and signal strength come only from analytics tools.
@@ -112,6 +235,13 @@ MODEL_NAME = os.environ.get("SARVAM_MODEL", "sarvam-105b")
 # without allowing an unbounded investigation.
 MAX_TOOL_CALLS = 12
 
+# Bounded retry budget for the FINAL SYNTHESIS step only (see
+# _synthesize_final_answer). This never triggers a new analytics tool
+# call or re-runs the investigation — it only re-invokes the model
+# against the evidence already collected in `trace`. Kept small and
+# fixed so a failing model can never hang the request indefinitely.
+MAX_SYNTHESIS_RETRIES = 2
+
 GROUNDING_TOLERANCE = 0.02
 MIN_DIGITS_TO_GROUND = 3
 
@@ -161,24 +291,53 @@ _GENERAL_MARKERS = (
     "revenue", "sales performance", "overall performance",
     "business performance", "overall sales", "total sales",
 )
+# NOTE: _GENERAL_MARKERS is intentionally UNUSED as a scope override — see
+# the bug explanation in _classify_scope's docstring. Kept only as a
+# documented list of words that historically triggered the bug, so a
+# future maintainer doesn't reintroduce the same short-circuit.
 
 
 def _classify_scope(question: str) -> set[str]:
-    """Deterministically decides mandatory dimension scope. General
-    questions get all four dimensions; a genuinely narrow question gets
-    only that one; anything ambiguous defaults to all four rather than
-    risking under-investigation."""
+    """Deterministically decides mandatory dimension scope. A question that
+    names one OR MORE specific dimensions (category/channel/inventory/
+    marketing) gets exactly those dimensions; a question naming none of
+    them defaults to all four for safety.
+
+    FIXED BUG (v1): a previous version checked `_GENERAL_MARKERS` (words
+    like "revenue") BEFORE checking dimension keywords, and returned all
+    four dimensions immediately on a match. Because the word "revenue"
+    appears in nearly every RCA question — including narrow ones like
+    "Which CATEGORIES contributed most to the REVENUE decline?" — that
+    check silently overrode explicit single-dimension questions on every
+    investigation, not intermittently. Dimension keywords are now checked
+    first and are authoritative whenever any dimension is named.
+
+    FIXED BUG (v2): a previous version of THIS function still forced all
+    four dimensions whenever more than one dimension keyword matched —
+    i.e. a question naming exactly two dimensions ("Did inventory or
+    marketing show the stronger negative signal?") was treated the same
+    as a question naming none, and got category+channel evidence mixed in
+    that nobody asked about. A question naming N specific dimensions
+    (N >= 1) is now scoped to exactly those N dimensions; "default to all
+    four" is now reserved for the case where NO dimension is named at
+    all (e.g. "Why did revenue decline?").
+    """
     q = re.sub(r"\s+", " ", question.lower()).strip()
-
-    if any(marker in q for marker in _GENERAL_MARKERS):
-        return set(DIMENSION_ORDER)
-
     q_for_matching = q.replace("marketing channel", "marketing")
     hits = {dim for dim, kws in _DIMENSION_KEYWORDS.items() if any(kw in q_for_matching for kw in kws)}
 
-    if len(hits) == 1:
+    if hits:
         return hits
     return set(DIMENSION_ORDER)
+
+
+def _relevant_dimension_tools(question: str) -> set[str]:
+    """The DIMENSION_TOOL names relevant to a question's scope, per
+    _classify_scope. Used to filter strongest-signal/confidence/fallback
+    computation so a narrow question's results only ever reflect the
+    dimension(s) actually asked about — even if the model independently
+    calls an extra tool outside that scope."""
+    return {DIMENSION_TOOL[d] for d in _classify_scope(question)}
 
 
 # ============================================================
@@ -356,6 +515,17 @@ Before writing the final answer, identify:
 4. COMPARISON:
    What periods or observations are being compared?
 
+5. QUESTION TYPE:
+   Is the user asking for an explanation, a comparison, a ranking,
+   a trend, a recommendation/advice, a risk/opportunity assessment,
+   or an evidence/confidence assessment? Answer THAT question — do
+   not silently substitute a different (even related) business
+   question. If the user asks "which factor was the strongest
+   observed contributor?", answer that directly ("the strongest
+   observed contributor was X...") — do not rewrite it into "why did
+   average order value decrease?" or any other question they did not
+   ask.
+
 The scope of the final answer MUST match the scope of the question.
 
 NARROW QUESTION:
@@ -409,6 +579,19 @@ then present the chronological trend returned by the analytics tool.
 
 Do NOT convert it into a two-period RCA unless the user explicitly
 asks for a comparison or explanation.
+
+RECOMMENDATION / ADVICE QUESTION:
+
+If the user asks:
+
+"What advice would you give management?"
+"What should we do next?"
+"How can we improve revenue?"
+
+then lead with a direct recommendation grounded in the strongest
+available evidence — see the BUSINESS ADVICE section below. Do not
+answer with a general RCA when the user asked specifically for advice
+or next steps.
 
 The user's question determines the response scope.
 """
@@ -684,6 +867,113 @@ Do not generate generic business advice.
 """
 
 
+_BUSINESS_ADVICE_RULE = """
+============================================================
+BUSINESS ADVICE / "WHAT SHOULD WE DO" QUESTIONS
+============================================================
+
+For broad questions such as "What advice would you give management?",
+"How can we improve revenue?", "What should we do next?", or "What are
+the biggest risks/opportunities?", answer using ONLY evidence from the
+current investigation, structured as:
+
+1. OBSERVED SITUATION — the headline metric movement, with both
+   periods named explicitly.
+2. STRONGEST RELEVANT EVIDENCE — the STRONG/MODERATE signal(s) most
+   relevant to the question (e.g. risk questions lean on deteriorating
+   signals; opportunity questions lean on improving signals).
+3. RECOMMENDED ACTION — tied directly and explicitly to that evidence.
+4. WHAT TO VALIDATE NEXT — a concrete investigation or experiment, not
+   a guaranteed fix. Recommending an investigation is valid even when
+   causality is not established.
+5. LIMITATION — state plainly that the evidence indicates association
+   or contribution, not proven causation.
+
+Do NOT produce generic MBA-style advice ("focus on customer retention",
+"invest in brand building", "optimize the supply chain") unless it is
+explicitly and directly tied to a signal actually returned by the tools
+during this investigation. If no STRONG or MODERATE signal exists for
+the relevant scope, say so explicitly ("no strong or moderate signal was
+found to base a specific recommendation on") rather than inventing a
+plausible-sounding recommendation to fill the gap.
+
+RISK vs. OPPORTUNITY QUESTIONS:
+
+"What are the biggest risks visible in the data?" -> report the
+deteriorating (declining revenue, falling ROAS, dropping availability,
+rising stockouts) signals with STRONG/MODERATE strength.
+
+"What opportunities are visible in the data?" -> report the improving
+(growing revenue, rising ROAS, strong category/channel growth) signals
+with STRONG/MODERATE strength.
+
+"Which areas improved enough to offset declining areas?" -> compare the
+absolute/contribution figures already returned by the comparison tools;
+do not estimate an offset that the tools did not compute.
+"""
+
+
+_NO_QUESTION_REWRITING_RULE = """
+============================================================
+NO QUESTION REWRITING
+============================================================
+
+Never invent a new investigation question.
+
+The "Investigation Question" line in your response format MUST reproduce
+the user's actual question, verbatim except for trivial whitespace or
+capitalization normalization. Never paraphrase it, never narrow it, and
+never substitute a different (even closely related) question.
+
+BAD — user asked "Give me a root cause analysis of the revenue change."
+and the response states:
+
+"## Investigation Question
+Why did revenue decrease from June 2026 to July 2026?"
+
+This is a fabricated question the user did not ask. It is a numeric-
+integrity-adjacent violation: it misrepresents what was investigated.
+
+GOOD — the same response states:
+
+"## Investigation Question
+Give me a root cause analysis of the revenue change."
+
+You MAY use the resolved periods elsewhere in the response (Period
+section, Executive Summary, etc.) — the restriction applies only to the
+"Investigation Question" line itself.
+"""
+
+
+_OUT_OF_SCOPE_RULE = """
+============================================================
+QUESTIONS BEYOND AVAILABLE DATA
+============================================================
+
+The available dataset and tools cover only: sales (revenue, orders,
+units, average order value), product categories, sales channels,
+inventory (availability, closing stock, stockouts), and marketing
+(spend, attributed revenue, ROAS).
+
+If a question requires information the dataset and tools do not
+contain — for example pricing strategy, competitor activity, customer
+sentiment/reviews, macroeconomic conditions, staffing, logistics cost,
+or SKU-level detail beyond what a tool actually returns:
+
+- Do NOT hallucinate an answer.
+- State plainly: "The available dataset does not contain the
+  information required to answer that question."
+- Where useful, briefly explain what additional data would be needed.
+- If PART of the question can be answered from available evidence,
+  answer that part using the normal evidence rules, and clearly flag
+  the part that cannot be answered.
+
+This is preferable to producing a plausible-sounding but unsupported
+answer. Never fabricate data, studies, benchmarks, or industry figures
+to fill the gap.
+"""
+
+
 _FINAL_RESPONSE_FORMAT = """
 ============================================================
 FINAL RESPONSE FORMAT
@@ -861,6 +1151,48 @@ Do not invent a cause for the trend.
 Do not force the result into a two-period RCA.
 
 ------------------------------------------------------------
+E. RECOMMENDATION / ADVICE QUESTION
+------------------------------------------------------------
+
+Example:
+"What advice would you give management to improve revenue?"
+"What should we do next based on the strongest signals?"
+"What are the biggest risks/opportunities visible in the data?"
+
+Use:
+
+## Investigation Question
+<question>
+
+## Recommendation
+<Direct answer — lead with the recommendation itself, not
+background.>
+
+## Evidence Behind It
+<Observed signals that support the recommendation, with tool-returned
+figures and signal_strength. Only STRONG/MODERATE signals unless
+explicitly asked to include weak ones.>
+
+## Recommended Actions
+1. <action>
+2. <action>
+3. <action>
+
+## What To Validate Next
+<Concrete next investigation/experiment before committing resources.>
+
+## Data Limitation
+State that the evidence indicates association/contribution, not proven
+causation.
+
+## Confidence
+Use the deterministic confidence exactly.
+
+If no STRONG or MODERATE signal exists to support a specific
+recommendation, say so explicitly instead of filling the section with
+generic advice.
+
+------------------------------------------------------------
 
 GENERAL FORMATTING RULES:
 
@@ -898,6 +1230,15 @@ Do not collect unrelated evidence merely to make the answer look
 more comprehensive.
 
 Evidence breadth must follow question scope.
+
+If a SYSTEM NOTE already supplied the dimension evidence you need (it
+lists which tools were already run), use it directly — do not call that
+same tool again "to double-check", and do not call ADDITIONAL dimension
+tools (category/channel/inventory/marketing) outside what the question
+actually asks about. A question scoped to one dimension should result in
+evidence from that one dimension only; pulling in extra dimensions wastes
+budget, produces a longer answer than the question calls for, and risks
+mixing unrelated evidence into the response.
 """
 
 
@@ -925,7 +1266,14 @@ def _build_system_prompt(
         "Your job is to investigate business questions using ONLY the "
         "analytical tools and application context provided to you. "
         "The analytical tools are the source of truth for all business "
-        "numbers and deterministic evidence.\n\n"
+        "numbers and deterministic evidence. You are able to answer a "
+        "broad range of natural-language business questions — general "
+        "RCA, narrow dimension questions, ranking, trend, comparison, "
+        "recommendation/advice, risk/opportunity, and evidence/confidence "
+        "questions — provided they are answerable from the available "
+        "dataset and tools. You are not a general-purpose chatbot: for "
+        "anything outside that scope, say so explicitly rather than "
+        "guessing.\n\n"
         f"The dataset's latest available date is: {DATASET_END_DATE}\n"
         "The dataset is synthetic historical business data. "
         "Do NOT assume today's date is the same as the dataset date.\n\n"
@@ -939,6 +1287,9 @@ def _build_system_prompt(
         + _CONFIDENCE_RULE
         + _NUMERIC_INTEGRITY_RULE
         + _RECOMMENDATION_RULE
+        + _BUSINESS_ADVICE_RULE
+        + _OUT_OF_SCOPE_RULE
+        + _NO_QUESTION_REWRITING_RULE
         + _FINAL_RESPONSE_FORMAT
         + _TOOL_EFFICIENCY.format(MAX_TOOL_CALLS=MAX_TOOL_CALLS)
     )
@@ -952,7 +1303,8 @@ SYNTHESIS_INSTRUCTION = (
     "1. narrow dimension/RCA question\n"
     "2. general RCA question\n"
     "3. cross-period ranking\n"
-    "4. time-series/trend\n\n"
+    "4. time-series/trend\n"
+    "5. recommendation/advice question (including risk/opportunity)\n\n"
     "Use the corresponding final response format exactly.\n\n"
     "Prioritize the direct answer over background explanation.\n"
     "Do not add unrelated dimensions.\n"
@@ -961,6 +1313,8 @@ SYNTHESIS_INSTRUCTION = (
     "Do not convert correlation or signal strength into proven causation.\n"
     "If the question is narrow, keep the answer narrow.\n"
     "If evidence is insufficient, say so explicitly.\n"
+    "If the question asks for something the dataset/tools cannot provide, "
+    "say so explicitly instead of guessing.\n"
     "Use the deterministic confidence value from the SYSTEM NOTE if "
     "provided; otherwise write exactly: "
     "\"Confidence: Not provided by the analytical tools.\""
@@ -1168,6 +1522,131 @@ def _extract_period_args(trace: list) -> dict | None:
 
 
 # ============================================================
+# BOOTSTRAP EVIDENCE (application-supplied periods)
+# ============================================================
+
+def _bootstrap_period_evidence(
+    trace: list,
+    question: str,
+    current_period: dict | None,
+    comparison_period: dict | None,
+) -> str | None:
+    """Deterministically pre-populate the revenue KPI headline AND the
+    required dimension evidence for the application-supplied periods,
+    BEFORE the model's first turn — rather than waiting for the model to
+    choose to call compare_sales_kpis first.
+
+    WHY THIS EXISTS (real production bug):
+    `_mandatory_evidence_node` only fires after a KPI comparison
+    (`compare_sales_kpis` or `compare_periods(metric="revenue")`) already
+    appears in the trace — see `_after_tools_route` / `_has_kpi_comparison`.
+    That was meant to reuse the model's already-resolved periods, but it
+    silently assumed the model would always call the KPI tool first. A
+    real investigation ("What were the strongest observed contributors to
+    the revenue change?") showed the model jumping straight to
+    compare_category_performance without ever calling compare_sales_kpis —
+    so mandatory dimension evidence never triggered, the UI's "Revenue
+    Change" card was left blank, and only one dimension was investigated
+    for what was really a general-scope question.
+
+    Since app.py always resolves and passes current_period/
+    comparison_period before calling run_investigation, we already know
+    the periods the investigation should use in the common case (no
+    explicitly different period named in the question) — there is no
+    reason to wait on the model. This bootstrap makes the KPI headline and
+    dimension coverage guarantees actually unconditional instead of
+    conditional on model behavior.
+
+    This does NOT prevent the model from independently investigating a
+    DIFFERENT, explicitly-named period (system prompt rule 3 under
+    APPLICATION-CONTROLLED PERIOD CONTEXT) — if it does, the existing
+    `_mandatory_evidence_node` still fires for that different period
+    (mandatory_evidence_injected starts False), and tool-call
+    deduplication means nothing here is ever executed twice.
+    """
+    if not current_period or not comparison_period:
+        return None
+
+    period_args = {
+        "current_start_date": current_period.get("start_date"),
+        "current_end_date": current_period.get("end_date"),
+        "previous_start_date": comparison_period.get("start_date"),
+        "previous_end_date": comparison_period.get("end_date"),
+    }
+    if not all(period_args.values()):
+        return None
+
+    tool_lookup = {tool.name: tool for tool in TOOLS}
+    kpi_tool = tool_lookup.get("compare_sales_kpis")
+    if kpi_tool is None:
+        return None
+
+    try:
+        kpi_result = kpi_tool.invoke(period_args)
+    except Exception as exc:
+        kpi_result = {"status": "error", "reason": f"Tool execution failed: {type(exc).__name__}: {exc}"}
+
+    kpi_trace_status = (
+        "success" if kpi_result.get("status") == "ok"
+        else "no_data" if kpi_result.get("status") == "no_data"
+        else "failed"
+    )
+    trace.append({"tool": "compare_sales_kpis", "input": period_args, "result": kpi_result, "trace_status": kpi_trace_status})
+
+    injected_results = {"compare_sales_kpis": kpi_result}
+    required_dims = _classify_scope(question)
+
+    for dim in DIMENSION_ORDER:
+        if dim not in required_dims:
+            continue
+        tool_name = DIMENSION_TOOL[dim]
+        tool_fn = tool_lookup.get(tool_name)
+        if tool_fn is None:
+            continue
+        try:
+            output = tool_fn.invoke(dict(period_args))
+            trace_status = (
+                "success" if output.get("status") == "ok"
+                else "no_data" if output.get("status") == "no_data"
+                else "failed"
+            )
+        except Exception as exc:
+            output = {"status": "error", "reason": f"Tool execution failed: {type(exc).__name__}: {exc}"}
+            trace_status = "failed"
+
+        trace.append({"tool": tool_name, "input": dict(period_args), "result": output, "trace_status": trace_status})
+        injected_results[tool_name] = output
+
+    # Scoped to the question's own dimensions (required_dims), so this
+    # confidence value is consistent with the same evidence the model is
+    # told to base its answer on — never inflated/deflated by a dimension
+    # outside what the question actually asked about.
+    allowed_tools = {DIMENSION_TOOL[d] for d in required_dims}
+    confidence, confidence_reason = _deterministic_confidence(trace, allowed_tools=allowed_tools)
+
+    note_parts = [
+        "SYSTEM NOTE: The following evidence has been collected automatically, "
+        "before your first turn, for the application-controlled current/"
+        "comparison periods. This IS the investigation's revenue headline and "
+        "dimension evidence — do not call these same tools again for these "
+        "exact periods. Use these exact figures and signal_strength values in "
+        "your synthesis. Report a failed or no_data entry as \"investigation "
+        "failed\" or \"no data available\", never as \"not investigated\". If "
+        "the user's question explicitly names a different period, you may "
+        "still call resolve_named_period/comparison tools for that different "
+        "period.\n\n" + json.dumps(injected_results, default=str)
+    ]
+    if confidence:
+        note_parts.append(
+            f"SYSTEM NOTE: The deterministic confidence for this investigation is {confidence} "
+            f"— {confidence_reason}. State this exact confidence value in your final answer; "
+            "do not infer or invent a different one."
+        )
+
+    return "\n\n".join(note_parts)
+
+
+# ============================================================
 # MANDATORY EVIDENCE NODE
 # ============================================================
 
@@ -1219,7 +1698,11 @@ def _mandatory_evidence_node(state: AgentState, trace: list, question: str) -> d
         trace.append({"tool": tool_name, "input": dict(period_args), "result": output, "trace_status": trace_status})
         injected_results[tool_name] = output
 
-    confidence, confidence_reason = _deterministic_confidence(trace)
+    # Scoped exactly like the bootstrap's confidence computation — see
+    # that function's comment for why this must match the question's
+    # actual dimension scope rather than the whole trace.
+    allowed_tools = {DIMENSION_TOOL[d] for d in required_dims}
+    confidence, confidence_reason = _deterministic_confidence(trace, allowed_tools=allowed_tools)
 
     note_parts = []
     if injected_results:
@@ -1334,64 +1817,229 @@ def _check_grounding(final_text: str, trace: list) -> list[str]:
     return suspicious
 
 
-def _retry_with_strict_grounding(llm_no_tools, system_prompt: str, trace: list, suspicious: list[str]) -> str | None:
+def _attempt_synthesis_recovery(
+    llm_no_tools,
+    system_prompt: str,
+    trace: list,
+    question: str,
+    reason: str,
+    suspicious: list[str] | None = None,
+) -> str | None:
+    """One bounded recovery attempt: re-invokes the no-tools model directly
+    against the SAME already-collected evidence (no new analytics/tool
+    calls, no re-investigation) — either because the previous attempt
+    returned empty/no content, or because it contained numbers that
+    couldn't be verified against the tool evidence. Returns cleaned text,
+    or None if this attempt also failed to produce anything usable.
+
+    FIXED BUG: a previous version never included the actual user
+    `question` text in this recovery call — only the evidence and a
+    generic "answer the user's original question" instruction. Since this
+    call is a brand-new, standalone LLM invocation (deliberately NOT
+    reusing the original conversation's message history, to avoid
+    resending a possibly-malformed prior turn), the model had no way to
+    know what the original question actually was, and would default to
+    answering a generic "why did revenue decline" narrative regardless of
+    what was really asked — a real, observed case of the recovered answer
+    silently addressing the wrong question. The question is now restated
+    explicitly and verbatim in every recovery prompt.
+    """
     evidence_text = json.dumps(
         [{"tool": step["tool"], "input": step["input"], "result": step["result"]} for step in trace],
         default=str,
     )
-    strict_prompt = (
-        "Your previous answer contained numeric figures that could not be "
-        f"verified against the tool evidence: {', '.join(suspicious)}.\n\n"
-        "Rewrite the answer using ONLY the evidence below. Every numeric claim must "
-        "match a value appearing in that evidence. Do not invent calculations, "
-        "numbers, causes, or assumptions. Do not use causal certainty. Prefer "
-        "'contributing factor', 'strongest observed signal', or 'consistent with'. "
-        "If causation is not established, explicitly say: 'The available data does "
-        "not establish direct causation.'\n\n"
-        "Use the exact ROOT CAUSE ANALYSIS format from the system instructions.\n\n"
+    if reason == "empty":
+        instruction = (
+            "Your previous response was empty or did not complete. Produce the final answer "
+            "NOW, using ONLY the evidence below. Do not call any tools — the investigation is "
+            "already complete. Answer the user's original question directly and concisely, using "
+            "whichever response format from the system instructions matches the question type. "
+            "Do not invent numbers, causes, or assumptions. Prefer 'contributing factor', "
+            "'strongest observed signal', or 'consistent with' over causal certainty."
+        )
+    else:
+        instruction = (
+            "Your previous answer contained numeric figures that could not be verified against "
+            f"the tool evidence: {', '.join(suspicious or [])}.\n\n"
+            "Rewrite the answer using ONLY the evidence below. Every numeric claim must match a "
+            "value appearing in that evidence. Do not invent calculations, numbers, causes, or "
+            "assumptions. Do not use causal certainty. Prefer 'contributing factor', 'strongest "
+            "observed signal', or 'consistent with'. If causation is not established, explicitly "
+            "say: 'The available data does not establish direct causation.'\n\n"
+            "Use the response format from the system instructions that matches the question type."
+        )
+    prompt = (
+        f"{instruction}\n\n"
+        f"THE USER'S ORIGINAL INVESTIGATION QUESTION (answer exactly this question, "
+        f"verbatim — do not substitute a different question):\n\"{question}\"\n\n"
         f"EVIDENCE:\n{evidence_text}"
     )
     try:
-        response = llm_no_tools.invoke([SystemMessage(content=system_prompt), HumanMessage(content=strict_prompt)])
+        response = llm_no_tools.invoke([SystemMessage(content=system_prompt), HumanMessage(content=prompt)])
         return _extract_text(response.content).strip() or None
     except Exception:
         return None
+
+
+def _synthesize_final_answer(
+    llm_no_tools,
+    system_prompt: str,
+    trace: list,
+    question: str,
+    initial_answer: str,
+) -> tuple[str | None, str]:
+    """Bounded, evidence-reusing recovery loop for the final synthesis step.
+
+    Handles the two ways synthesis can go wrong — an empty/incomplete
+    response, or a non-empty response with ungrounded numbers — with a
+    single unified retry loop instead of only handling the grounding case
+    (a prior version had no retry at all for an empty response, going
+    straight to the deterministic fallback on the very first empty
+    completion, which is a real contributor to the "works on the second
+    try" symptom: the SAME model, given the SAME evidence again, quite
+    often succeeds on the very next attempt).
+
+    Never re-runs analytics tools and never calls the LLM more than
+    MAX_SYNTHESIS_RETRIES additional times — bounded, no infinite loop.
+
+    Returns (final_text_or_None, outcome) where outcome is one of:
+      "ok"                  — initial_answer was already good, no retry needed
+      "recovered"           — a bounded retry produced a good answer
+      "failed"               — all bounded attempts exhausted; caller must
+                                use the deterministic fallback
+    """
+    if initial_answer:
+        suspicious = _check_grounding(initial_answer, trace)
+        if not suspicious:
+            return initial_answer, "ok"
+        reason = "grounding"
+    else:
+        suspicious = []
+        reason = "empty"
+
+    for _ in range(MAX_SYNTHESIS_RETRIES):
+        retried = _attempt_synthesis_recovery(llm_no_tools, system_prompt, trace, question, reason, suspicious)
+        if not retried:
+            # The retry itself came back empty/errored — try again (still
+            # bounded by the loop) treating it as another empty case.
+            reason, suspicious = "empty", []
+            continue
+        retried_suspicious = _check_grounding(retried, trace)
+        if not retried_suspicious:
+            return retried, "recovered"
+        reason, suspicious = "grounding", retried_suspicious
+
+    return None, "failed"
 
 
 # ============================================================
 # DETERMINISTIC SIGNALS / STRONGEST SIGNAL / CONFIDENCE
 # ============================================================
 
-def _collect_signals(trace: list) -> list[tuple]:
-    """(dimension, label, change, signal_strength) for every STRONG/MODERATE
-    signal, deterministically ranked by:
+def _collect_signals(trace: list, allowed_tools: set[str] | None = None) -> list[tuple]:
+    """(dimension, label, change, signal_strength, rupee_impact) for every
+    STRONG/MODERATE signal, deterministically ranked by:
       1. signal strength (STRONG > MODERATE)
-      2. absolute magnitude of the relevant change (larger first)
-      3. fixed dimension priority (Category > Channel > Inventory > Marketing)
-    NEVER by trace insertion order."""
+      2. absolute rupee revenue impact, where computable (larger first) —
+         see note below
+      3. absolute magnitude of the dimension's own relative change, as a
+         fallback for dimensions with no rupee-comparable figure
+      4. fixed dimension priority (Category > Channel > Inventory > Marketing)
+    NEVER by trace insertion order.
+
+    allowed_tools: when provided (typically `_relevant_dimension_tools(question)`),
+    restricts consideration to signals from those tool names only — e.g. a
+    question scoped to "category" never surfaces a Marketing or Inventory
+    signal here, even if that tool happens to appear elsewhere in the
+    trace. None (the default) considers every dimension tool in the trace,
+    unchanged from prior behavior.
+
+    WHY RUPEE IMPACT, NOT RELATIVE %:
+    A prior version ranked purely by each dimension's own relative percentage
+    change (e.g. category revenue_change_pct vs marketing
+    attributed_revenue_change_pct vs inventory availability_change_pct_points).
+    Those are different bases and not comparable — a real production bug
+    surfaced this: Meta's attributed revenue moved -34.77% off a small
+    ~3.3M base (a ~1.15M rupee swing) while Running category moved "only"
+    -30.88% off a much larger ~6.98M base (a ~2.15M rupee swing, and 63.96%
+    of the ENTIRE revenue delta per compare_category_performance's own
+    contribution_to_total_change_pct). The old ranker picked Meta as
+    "strongest" purely because -34.77 > -30.88, directly contradicting the
+    model's own Root Cause Ranking (which correctly led with Running) and
+    undermining trust in the deterministic UI card. Ranking by rupee impact
+    where a rupee figure exists (category: absolute_revenue_change; channel
+    and marketing: current-vs-previous revenue/attributed-revenue
+    difference, computed here from tool-returned figures only — never
+    estimated) puts every dimension on the same footing as the revenue
+    change actually being investigated. Inventory has no revenue-equivalent
+    figure (availability points, stockout days) and is never converted into
+    one; it instead ranks by its own relative magnitude, below any
+    dimension that DOES have a computed rupee impact, so it is never
+    silently placed above (or below) a revenue mover using invented
+    numbers.
+    """
     signals = []
     for step in trace:
         tool, result = step["tool"], step["result"]
+        if allowed_tools is not None and tool not in allowed_tools:
+            continue
         if tool == "compare_category_performance":
             for r in result.get("categories", []):
                 if r.get("signal_strength") in ("STRONG", "MODERATE"):
-                    signals.append(("Category", r.get("category", "Unknown"), r.get("revenue_change_pct"), r["signal_strength"]))
+                    rupee_impact = r.get("absolute_revenue_change")
+                    signals.append((
+                        "Category", r.get("category", "Unknown"),
+                        r.get("revenue_change_pct"), r["signal_strength"],
+                        abs(rupee_impact) if rupee_impact is not None else None,
+                    ))
         elif tool == "compare_channel_performance":
             for r in result.get("channels", []):
                 if r.get("signal_strength") in ("STRONG", "MODERATE"):
-                    signals.append(("Channel", r.get("channel", "Unknown"), r.get("revenue_change_pct"), r["signal_strength"]))
+                    current_rev = r.get("current_revenue")
+                    previous_rev = r.get("previous_revenue")
+                    rupee_impact = (
+                        abs(current_rev - previous_rev)
+                        if current_rev is not None and previous_rev is not None
+                        else None
+                    )
+                    signals.append((
+                        "Channel", r.get("channel", "Unknown"),
+                        r.get("revenue_change_pct"), r["signal_strength"],
+                        rupee_impact,
+                    ))
         elif tool == "compare_marketing_performance":
             for r in result.get("channels", []):
                 if r.get("signal_strength") in ("STRONG", "MODERATE"):
-                    signals.append(("Marketing", r.get("channel", "Unknown"), r.get("attributed_revenue_change_pct"), r["signal_strength"]))
+                    current_rev = r.get("current_attributed_revenue")
+                    previous_rev = r.get("previous_attributed_revenue")
+                    rupee_impact = (
+                        abs(current_rev - previous_rev)
+                        if current_rev is not None and previous_rev is not None
+                        else None
+                    )
+                    signals.append((
+                        "Marketing", r.get("channel", "Unknown"),
+                        r.get("attributed_revenue_change_pct"), r["signal_strength"],
+                        rupee_impact,
+                    ))
         elif tool == "compare_inventory_performance" and result.get("status") == "ok":
             if result.get("signal_strength") in ("STRONG", "MODERATE"):
-                signals.append(("Inventory", "Availability / stockouts", result.get("availability_change_pct_points"), result["signal_strength"]))
+                # No revenue-equivalent figure exists for inventory — never
+                # invented. rupee_impact stays None so this ranks by its own
+                # relative magnitude, after any dimension with a real rupee
+                # figure of matching or greater strength.
+                signals.append((
+                    "Inventory", "Availability / stockouts",
+                    result.get("availability_change_pct_points"), result["signal_strength"],
+                    None,
+                ))
 
     strength_rank = {"STRONG": 2, "MODERATE": 1}
     signals.sort(
         key=lambda s: (
             -strength_rank.get(s[3], 0),
+            s[4] is None,
+            -(s[4] if s[4] is not None else 0),
             -(abs(s[2]) if s[2] is not None else 0),
             DIMENSION_PRIORITY.get(s[0], 99),
         )
@@ -1399,27 +2047,43 @@ def _collect_signals(trace: list) -> list[tuple]:
     return signals
 
 
-def get_strongest_signal(trace: list) -> dict | None:
+def get_strongest_signal(trace: list, allowed_tools: set[str] | None = None) -> dict | None:
     """The single deterministic answer to "what's the strongest signal" —
     the UI should display exactly this, not recompute its own version
     (a prior version of app.py maintained a separate copy that
-    inconsistently included WEAK signals)."""
-    signals = _collect_signals(trace)
+    inconsistently included WEAK signals). Ranked by rupee revenue impact
+    where computable, see _collect_signals for why. allowed_tools scopes
+    this to the question's dimension(s) — see _collect_signals."""
+    signals = _collect_signals(trace, allowed_tools=allowed_tools)
     if not signals:
         return None
-    dimension, label, change, strength = signals[0]
-    return {"dimension": dimension, "label": label, "change": change, "strength": strength}
+    dimension, label, change, strength, rupee_impact = signals[0]
+    return {
+        "dimension": dimension,
+        "label": label,
+        "change": change,
+        "strength": strength,
+        "rupee_impact": rupee_impact,
+    }
 
 
-def _any_dimension_tool_succeeded(trace: list) -> bool:
-    dimension_tools = set(DIMENSION_TOOL.values())
+def _any_dimension_tool_succeeded(trace: list, allowed_tools: set[str] | None = None) -> bool:
+    dimension_tools = set(DIMENSION_TOOL.values()) if allowed_tools is None else set(allowed_tools)
     return any(step["tool"] in dimension_tools and step["result"].get("status") == "ok" for step in trace)
 
 
-def _deterministic_confidence(trace: list) -> tuple[str | None, str | None]:
+def _deterministic_confidence(
+    trace: list, allowed_tools: set[str] | None = None
+) -> tuple[str | None, str | None]:
+    """allowed_tools scopes confidence to the same dimension(s) the answer
+    itself is scoped to (see _collect_signals) — so a narrow category
+    question's confidence reflects only category evidence, never an
+    unrelated STRONG marketing signal the user didn't ask about. This
+    keeps the Confidence badge, the Strongest Signal card, and the
+    model's own Root Cause Ranking describing the same evidence."""
     if not trace:
         return None, None
-    signals = _collect_signals(trace)
+    signals = _collect_signals(trace, allowed_tools=allowed_tools)
     strong_count = sum(1 for s in signals if s[3] == "STRONG")
     moderate_count = sum(1 for s in signals if s[3] == "MODERATE")
 
@@ -1427,7 +2091,7 @@ def _deterministic_confidence(trace: list) -> tuple[str | None, str | None]:
         return "HIGH", f"{strong_count} independent STRONG-signal dimensions were found."
     if strong_count == 1 or moderate_count >= 2:
         return "MEDIUM", "At least one meaningful signal was found, but causality is not established."
-    if _any_dimension_tool_succeeded(trace):
+    if _any_dimension_tool_succeeded(trace, allowed_tools=allowed_tools):
         return "LOW", "All required dimensions were investigated but none showed a STRONG or MODERATE signal."
     return "LOW", "Evidence gathered was weak or insufficient to support a confident conclusion."
 
@@ -1449,28 +2113,180 @@ def _extract_headline(trace: list):
 
 
 def _period_label(period: dict | None) -> str:
+    """Renders a period as 'label (start–end)' when a label is available,
+    else 'start–end'. Uses an en dash INSIDE a period's own date range so
+    it is never confused with the "to" that separates two periods being
+    compared — a prior version rendered both with the word "to", producing
+    ambiguous strings like "from 2026-06-01 to 2026-06-30 to 2026-07-01 to
+    2026-07-31" in the deterministic fallback text."""
     if not period:
-        return "unknown period"
+        return "an unknown period"
     start = period.get("start") or period.get("start_date")
     end = period.get("end") or period.get("end_date")
-    return f"{start} to {end}" if start and end else "unknown period"
+    label = period.get("label")
+    if not (start and end):
+        return "an unknown period"
+    date_range = f"{start}\u2013{end}"
+    return f"{label} ({date_range})" if label else date_range
 
 
 # ============================================================
 # DETERMINISTIC FALLBACK
 # ============================================================
 
-def _deterministic_fallback(trace: list) -> str:
+def _signed_rupees(value: float) -> str:
+    """Formats a signed rupee amount with the sign BEFORE the symbol
+    (-₹2,155,113.10), matching standard currency convention — Python's
+    default f"₹{value:,.2f}" would render a negative value as the
+    confusing "₹-2,155,113.10"."""
+    sign = "-" if value < 0 else ""
+    return f"{sign}\u20b9{abs(value):,.2f}"
+
+
+def _format_single_dimension_fallback(trace: list, dim: str) -> str | None:
+    """Dedicated, question-aware fallback formatter for a question scoped
+    to exactly ONE dimension (see _classify_scope). Uses the richest
+    tool-provided figures for that specific dimension — e.g. category's
+    own contribution_to_total_change_pct, which is the correct "how much
+    did each contribute" number — rather than the generic cross-dimension
+    "strongest observed contributing factors" list, which was designed
+    for general/multi-dimension questions and previously became
+    misleading for narrow ones (it could include an unrelated dimension's
+    signal that scored higher on the old ranking, or simply omit the
+    contribution-share figure the user actually asked for).
+
+    Returns None if the relevant tool didn't run or returned no usable
+    data, so the caller can fall through to the general fallback.
+    """
+    tool_name = DIMENSION_TOOL.get(dim)
+    step = next(
+        (s for s in trace if s["tool"] == tool_name and s["result"].get("status") == "ok"),
+        None,
+    )
+    if step is None:
+        return None
+    result = step["result"]
+
+    if dim == "category":
+        records = [r for r in result.get("categories", []) if r.get("contribution_to_total_change_pct") is not None]
+        if not records:
+            return None
+        records.sort(key=lambda r: abs(r["contribution_to_total_change_pct"]), reverse=True)
+        lead = records[0]
+        bullets = [
+            f"• {r['category']}: {r['revenue_change_pct']:+.2f}% revenue change "
+            f"({_signed_rupees(r['absolute_revenue_change'])}), "
+            f"{abs(r['contribution_to_total_change_pct']):.2f}% of the total revenue change, "
+            f"{r.get('signal_strength', '—')} signal"
+            for r in records
+        ]
+        return (
+            f"{lead['category']} contributed the most to the revenue change, accounting for "
+            f"{abs(lead['contribution_to_total_change_pct']):.2f}% of the total change "
+            f"({_signed_rupees(lead['absolute_revenue_change'])}).\n\n"
+            "Category contributions:\n" + "\n".join(bullets) + "\n\n"
+            "These are measured revenue contributions to the total change; they indicate "
+            "association and relative impact, not proof of causation."
+        )
+
+    if dim == "channel":
+        records = [r for r in result.get("channels", []) if r.get("revenue_change_pct") is not None]
+        if not records:
+            return None
+        for r in records:
+            current_rev = r.get("current_revenue")
+            previous_rev = r.get("previous_revenue")
+            r["_rupee_impact"] = (
+                abs(current_rev - previous_rev)
+                if current_rev is not None and previous_rev is not None
+                else None
+            )
+        records.sort(key=lambda r: (r["_rupee_impact"] is None, -(r["_rupee_impact"] or 0)))
+        lead = records[0]
+        lead_impact_text = f" (\u20b9{lead['_rupee_impact']:,.2f} impact)" if lead["_rupee_impact"] is not None else ""
+        bullets = [
+            f"• {r['channel']}: {r['revenue_change_pct']:+.2f}% revenue change"
+            + (f" (\u20b9{r['_rupee_impact']:,.2f} impact)" if r["_rupee_impact"] is not None else "")
+            + f", {r.get('current_revenue_share_pct', 0):.1f}% of current revenue, "
+            f"{r.get('signal_strength', '—')} signal"
+            for r in records
+        ]
+        return (
+            f"{lead['channel']} showed the largest measured revenue movement among sales "
+            f"channels ({lead['revenue_change_pct']:+.2f}%{lead_impact_text}).\n\n"
+            "Channel performance:\n" + "\n".join(bullets) + "\n\n"
+            "These are measured revenue movements; they indicate association and relative "
+            "impact, not proof of causation."
+        )
+
+    if dim == "marketing":
+        records = [r for r in result.get("channels", []) if r.get("roas_change_pct") is not None]
+        if not records:
+            return None
+        records.sort(key=lambda r: abs(r["roas_change_pct"]), reverse=True)
+        lead = records[0]
+        bullets = [
+            f"• {r['channel']}: ROAS {r.get('previous_roas', '—')} \u2192 {r.get('current_roas', '—')} "
+            f"({r['roas_change_pct']:+.2f}%), attributed revenue "
+            f"{r.get('attributed_revenue_change_pct', 0):+.2f}%, {r.get('signal_strength', '—')} signal"
+            for r in records
+        ]
+        return (
+            f"{lead['channel']} showed the largest measured marketing efficiency deterioration "
+            f"(ROAS change {lead['roas_change_pct']:+.2f}%).\n\n"
+            "Marketing channel performance:\n" + "\n".join(bullets) + "\n\n"
+            "These are measured marketing efficiency changes; they indicate association and "
+            "relative impact, not proof of causation."
+        )
+
+    if dim == "inventory":
+        availability_change = result.get("availability_change_pct_points")
+        stockout_change = result.get("stockout_days_change")
+        strength = result.get("signal_strength", "—")
+        note = result.get("evidence_note") or ""
+        pieces = []
+        if availability_change is not None:
+            pieces.append(f"availability changed {availability_change:+.2f} percentage points")
+        if stockout_change is not None:
+            pieces.append(f"stockout days changed {stockout_change:+d}")
+        summary = ", ".join(pieces) if pieces else "no material inventory change was observed"
+        text = f"Inventory shows a {strength} observed signal: {summary}."
+        if note:
+            text += f" {note}"
+        text += "\n\nThis indicates an association with the revenue change, not proof of causation."
+        return text
+
+    return None
+
+
+def _deterministic_fallback(trace: list, question: str = "") -> str:
     """Evidence-only fallback — never calls the LLM. Correctly distinguishes
     "a dimension was investigated but showed nothing STRONG/MODERATE" from
     "nothing was investigated at all", even for narrow questions that never
-    called compare_sales_kpis."""
+    called compare_sales_kpis.
+
+    question: when provided, scopes the fallback to the question's actual
+    dimension(s) via _classify_scope — a narrow single-dimension question
+    (e.g. "Which categories contributed most to the revenue decline?")
+    gets the dedicated _format_single_dimension_fallback narrative instead
+    of the generic cross-dimension "strongest observed contributing
+    factors" list, and never surfaces an unrelated dimension's evidence
+    even if it happens to be present in the trace. Omitting question
+    preserves the previous unscoped (all-dimension) behavior."""
     if not trace:
         return "AI investigation could not be completed and no business data was gathered. Please try again shortly."
 
+    scope_dims = _classify_scope(question) if question else set(DIMENSION_ORDER)
+    allowed_tools = {DIMENSION_TOOL[d] for d in scope_dims}
+
+    if len(scope_dims) == 1:
+        dedicated = _format_single_dimension_fallback(trace, next(iter(scope_dims)))
+        if dedicated:
+            return dedicated
+
     pct_change, current_period, previous_period = _extract_headline(trace)
-    signals = _collect_signals(trace)
-    any_dimension_evidence = _any_dimension_tool_succeeded(trace)
+    signals = _collect_signals(trace, allowed_tools=allowed_tools)
+    any_dimension_evidence = _any_dimension_tool_succeeded(trace, allowed_tools=allowed_tools)
 
     if pct_change is None and not any_dimension_evidence:
         return (
@@ -1487,11 +2303,23 @@ def _deterministic_fallback(trace: list) -> str:
         )
         lines.append("")
 
+    # Percentage-based dimensions (category revenue, channel revenue,
+    # marketing attributed revenue) get a "%" suffix; inventory's figure is
+    # percentage POINTS, a different unit, so it never gets "%" appended —
+    # that distinction matters for numeric-integrity/grounding purposes.
+    _PERCENT_DIMENSIONS = {"Category", "Channel", "Marketing"}
+
     if signals:
         lines.append("The strongest observed contributing factors were:")
-        for dimension, label, change, strength in signals[:5]:
-            change_text = f"{change:+.2f}" if change is not None else "—"
-            lines.append(f"• {dimension} — {label}: {change_text} ({strength} signal)")
+        for dimension, label, change, strength, rupee_impact in signals[:5]:
+            if change is None:
+                change_text = "—"
+            elif dimension in _PERCENT_DIMENSIONS:
+                change_text = f"{change:+.2f}%"
+            else:
+                change_text = f"{change:+.2f} pp"
+            impact_suffix = f", \u20b9{rupee_impact:,.0f} revenue impact" if rupee_impact is not None else ""
+            lines.append(f"• {dimension} — {label}: {change_text} ({strength} signal{impact_suffix})")
         lines.append("")
     elif any_dimension_evidence:
         lines.append(
@@ -1827,9 +2655,22 @@ def run_investigation(
     system_prompt = _build_system_prompt(current_period, comparison_period)
     trace: list = []
     app = _build_graph(llm, llm_no_tools, trace, question)
+
+    # Guarantee the revenue headline + required dimension evidence exist
+    # before the model's first turn, for the application-supplied periods —
+    # see _bootstrap_period_evidence for why this can no longer depend on
+    # the model choosing to call compare_sales_kpis itself.
+    bootstrap_note = _bootstrap_period_evidence(trace, question, current_period, comparison_period)
+
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=question)]
+    if bootstrap_note:
+        messages.append(HumanMessage(content=bootstrap_note))
+
     initial_state: AgentState = {
-        "messages": [SystemMessage(content=system_prompt), HumanMessage(content=question)],
-        "tool_call_count": 0,
+        "messages": messages,
+        # Tools already executed by the bootstrap count against the same
+        # per-investigation budget as model-triggered tool calls.
+        "tool_call_count": len(trace),
         "mandatory_evidence_injected": False,
     }
 
@@ -1850,30 +2691,46 @@ def run_investigation(
         result.current_period = current_period_used
         result.previous_period = previous_period_used
 
-        final_answer = _extract_text(final_state["messages"][-1].content).strip() if final_state.get("messages") else ""
+        # Every dimension/scope-sensitive computation below uses the SAME
+        # allowed_tools filter, so the Strongest Signal card, the
+        # Confidence badge, and the fallback text (if used) all describe
+        # exactly the evidence relevant to what was actually asked — never
+        # a mix of the question's dimension plus something else the model
+        # happened to also fetch.
+        allowed_tools = _relevant_dimension_tools(question)
 
-        if not final_answer:
-            result.final_answer = _deterministic_fallback(trace)
-            result.status = "synthesis_fallback"
+        raw_final_answer = _extract_text(final_state["messages"][-1].content).strip() if final_state.get("messages") else ""
+
+        # Bounded, evidence-reusing recovery — see _synthesize_final_answer.
+        # Never re-runs analytics tools; retries only the synthesis call
+        # itself, up to MAX_SYNTHESIS_RETRIES times, against the SAME
+        # trace collected above. The original question is passed through
+        # explicitly so a retry can never lose track of what was actually
+        # asked (see _attempt_synthesis_recovery's docstring for the bug
+        # this fixes).
+        recovered_answer, synthesis_outcome = _synthesize_final_answer(
+            llm_no_tools, system_prompt, trace, question, raw_final_answer
+        )
+
+        if recovered_answer:
+            result.final_answer = recovered_answer
+            # A successfully recovered answer (verified against the same
+            # evidence as any first-attempt answer) is NOT surfaced to the
+            # user as a warning — retry mechanics are an internal
+            # implementation detail, not something a business user needs
+            # to see once the answer is confirmed correct. status stays
+            # "ok" and grounding_warning stays unset either way.
         else:
-            suspicious = _check_grounding(final_answer, trace)
-            if suspicious:
-                retried = _retry_with_strict_grounding(llm_no_tools, system_prompt, trace, suspicious)
-                retried_suspicious = _check_grounding(retried, trace) if retried else suspicious
-                if retried and not retried_suspicious:
-                    result.final_answer = retried
-                else:
-                    result.final_answer = _deterministic_fallback(trace)
-                    result.status = "grounding_failed"
-                    result.grounding_warning = (
-                        "The AI-generated explanation contained figures that could not be verified "
-                        "against the collected evidence. A deterministic evidence-only summary is shown instead."
-                    )
-            else:
-                result.final_answer = final_answer
+            result.final_answer = _deterministic_fallback(trace, question)
+            result.status = "synthesis_fallback" if not raw_final_answer else "grounding_failed"
+            result.grounding_warning = (
+                "The AI-generated explanation could not be produced or verified against the "
+                f"collected evidence after {MAX_SYNTHESIS_RETRIES} retries. A deterministic "
+                "evidence-only summary is shown instead."
+            )
 
-        result.confidence, result.confidence_reason = _deterministic_confidence(trace)
-        result.strongest_signal = get_strongest_signal(trace)
+        result.confidence, result.confidence_reason = _deterministic_confidence(trace, allowed_tools=allowed_tools)
+        result.strongest_signal = get_strongest_signal(trace, allowed_tools=allowed_tools)
         return result
 
     except Exception as exc:
@@ -1881,11 +2738,12 @@ def run_investigation(
         _pct_change, current_period_used, previous_period_used = _extract_headline(trace)
         result.current_period = current_period_used
         result.previous_period = previous_period_used
+        allowed_tools = _relevant_dimension_tools(question)
 
         if _is_rate_limit_error(exc):
             result.status = "model_rate_limited"
             if trace:
-                result.final_answer = _deterministic_fallback(trace)
+                result.final_answer = _deterministic_fallback(trace, question)
                 result.grounding_warning = (
                     "The business-data investigation completed, but AI explanation generation is "
                     "temporarily unavailable because the model usage limit was reached."
@@ -1899,7 +2757,7 @@ def run_investigation(
 
         elif _is_auth_error(exc):
             result.status = "auth_error"
-            result.final_answer = _deterministic_fallback(trace) if trace else None
+            result.final_answer = _deterministic_fallback(trace, question) if trace else None
             result.grounding_warning = (
                 "AI explanation generation failed due to an authentication error with the AI "
                 "provider. Check that SARVAM_API_KEY is set correctly."
@@ -1907,10 +2765,10 @@ def run_investigation(
 
         else:
             result.status = "api_error"
-            result.final_answer = _deterministic_fallback(trace)
+            result.final_answer = _deterministic_fallback(trace, question)
             result.grounding_warning = f"Agent execution failed after {len(trace)} tool call(s): {type(exc).__name__}: {exc}"
 
         if trace:
-            result.confidence, result.confidence_reason = _deterministic_confidence(trace)
-            result.strongest_signal = get_strongest_signal(trace)
+            result.confidence, result.confidence_reason = _deterministic_confidence(trace, allowed_tools=allowed_tools)
+            result.strongest_signal = get_strongest_signal(trace, allowed_tools=allowed_tools)
         return result
