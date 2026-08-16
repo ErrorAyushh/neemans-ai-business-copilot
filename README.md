@@ -3,7 +3,8 @@
 An AI-powered business intelligence dashboard and Root Cause Analysis (RCA) agent built for Neeman's AI Intern assignment — **Part 1 (Business Analytics Copilot)** + **Part 2 (RCA Agent)**, delivered as a single coherent product. **Part 3 (AI Opportunity Roadmap)** is a separate document; see [Assignment Mapping](#assignment-mapping) below.
 
 **Live app:** https://neemans-ai-business-copilot-dk3sbk24rnuy9hbzr8wgmp.streamlit.app/
-**Repo:** _[ADD YOUR GITHUB REPO URL HERE]_
+
+**Repo:** https://github.com/ErrorAyushh/neemans-ai-business-copilot
 
 ---
 
