@@ -26,7 +26,7 @@ The two halves share one source of truth, so "what happened" and "why" can never
 ## Key Capabilities
 
 **Business Analytics Copilot (Part 1)**
-- Executive Overview: revenue, orders, units, and average order value, with period-over-period % change — computed entirely by pandas, nothing estimated.
+- Executive Overview: revenue, orders, units, and average order value, with period-over-period % change  computed entirely by pandas, nothing estimated.
 - Business Performance dashboard: category, channel, inventory, and marketing performance, each with period comparisons, revenue share, and ROAS/availability trends.
 - Every number on these pages traces back to a single function in `analytics/metrics.py`.
 
@@ -132,8 +132,8 @@ streamlit run app.py
 **Question:** *"Why did revenue decline in July compared with June 2026?"*
 
 1. The intent router classifies this as a two-period revenue RCA and the agent resolves June 2026 and July 2026 via `resolve_named_period`.
-2. `compare_sales_kpis` returns the headline comparison — in this project's synthetic dataset, June revenue of ₹15,448,942.10 against July revenue of ₹12,079,246.10, a **-21.81%** change.
-3. Once that headline comparison succeeds, category, channel, inventory, and marketing evidence for the same two periods is collected automatically — for example, the Running category at **-30.88%**, inventory availability falling from **99.3% to 74.95%** with stockout days rising from **0 to 56**, and Meta-attributed revenue at **-34.77%**.
+2. `compare_sales_kpis` returns the headline comparison  in this project's synthetic dataset, June revenue of ₹15,448,942.10 against July revenue of ₹12,079,246.10, a **-21.81%** change.
+3. Once that headline comparison succeeds, category, channel, inventory, and marketing evidence for the same two periods is collected automatically  for example, the Running category at **-30.88%**, inventory availability falling from **99.3% to 74.95%** with stockout days rising from **0 to 56**, and Meta-attributed revenue at **-34.77%**.
 4. The model writes an explanation using only those figures, tagging each contributing factor with its tool-reported `signal_strength` and a confidence level computed from how many STRONG/MODERATE signals were found.
 5. Before the answer is shown, every number and period it mentions is checked against the evidence from steps 2–3. If anything doesn't match, the system retries once against that same evidence; if it still doesn't match, a deterministic summary built directly from the tool evidence is shown instead.
 
