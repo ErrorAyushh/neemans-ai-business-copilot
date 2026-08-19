@@ -79,12 +79,12 @@ charts.py                     ← Plotly visualizations only — reads already-
 ## RCA Reliability / Grounding
 
 - **Business numbers come from deterministic analytics.** All revenue, percentage-change, ROAS, inventory-availability, monthly-ranking, and trend math lives in `analytics/metrics.py`; the agent only reads and narrates results pandas already produced.
-- **The LLM does not calculate source metrics.** It orchestrates tool calls and writes the final explanation — it never computes a percentage, a ranking, or a signal strength itself.
+- **The LLM does not calculate source metrics.** It orchestrates tool calls and writes the final explanation  it never computes a percentage, a ranking, or a signal strength itself.
 - **Evidence is collected before synthesis.** For a general revenue question, category/channel/inventory/marketing evidence is gathered automatically once the headline comparison succeeds, before the model is asked to write a final answer.
 - **Intent routing determines which analytics are investigated.** A deterministic regex classifier decides the shape of the question before any LLM call, so the model is never left to guess which tool applies, or to invent a second time period just to force-fit the wrong tool.
 - **Generated claims are checked against evidence where implemented.** Every number and named period in the AI's final answer is checked against the tool evidence collected during that investigation; unverifiable figures are flagged rather than shown.
 - **Causality is not claimed without evidence.** The agent's language is deliberately hedged ("contributing factor," "consistent with," "evidence suggests"), and its "Data Limitations" section states plainly that association is not causation.
-- **Deterministic fallback exists if AI synthesis cannot be safely verified.** If a generated answer fails grounding, the system attempts bounded recovery — one retry against the already-collected evidence — and if that also fails, replaces the answer with a deterministic, evidence-only summary rather than showing anything unverified.
+- **Deterministic fallback exists if AI synthesis cannot be safely verified.** If a generated answer fails grounding, the system attempts bounded recovery  one retry against the already-collected evidence — and if that also fails, replaces the answer with a deterministic, evidence-only summary rather than showing anything unverified.
 
 ### Causality
 
@@ -97,7 +97,7 @@ The RCA agent identifies **contributing signals and associations** in the data (
 | LLM | **Sarvam AI — sarvam-105b** (via `langchain-sarvam`) | Reasoning-capable model with native tool-calling through the standard LangChain `BaseChatModel` interface |
 | Orchestration | **LangGraph** | Explicit state machine for the investigation loop (agent → tools → mandatory evidence → synthesis), rather than an implicit agent loop that's harder to make deterministic |
 | Intent routing | **Deterministic regex classifier** (`agent/intent_router.py`) | Decides the shape of the question — two-period RCA, dimension investigation, ranking, trend, single-period lookup — before any model call, so the LLM is never forced to guess a period it wasn't given |
-| Business logic | **pandas** | All calculations — kept entirely separate from and outside the LLM |
+| Business logic | **pandas** | All calculations  kept entirely separate from and outside the LLM |
 | UI | **Streamlit + Plotly** | Fast to build a genuinely interactive internal tool with charts, tabs, and a chat-style investigation flow |
 | Grounding/validation | Custom numeric + period matching layer in `rca_agent.py` | Checks every number and named period in an AI answer against the actual evidence the tools returned before it's shown |
 
