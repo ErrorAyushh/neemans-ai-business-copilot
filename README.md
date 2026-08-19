@@ -32,14 +32,14 @@ The two halves share one source of truth, so "what happened" and "why" can never
 
 **Root Cause Analysis Agent (Part 2)**
 - Accepts free-text investigation questions and classifies their intent *before* any LLM call: two-period RCA, single-dimension investigation, dimension ranking, cross-period ranking, time-series trend, or single-period lookup.
-- For a revenue-change question, automatically collects category/channel/inventory/marketing evidence the moment the headline comparison succeeds — no dimension can be silently skipped by the model.
-- Ranks contributing signals and reports a confidence level (HIGH/MEDIUM/LOW) computed from how many STRONG/MODERATE signals were found — never estimated by the model.
+- For a revenue-change question, automatically collects category/channel/inventory/marketing evidence the moment the headline comparison succeeds  no dimension can be silently skipped by the model.
+- Ranks contributing signals and reports a confidence level (HIGH/MEDIUM/LOW) computed from how many STRONG/MODERATE signals were found  never estimated by the model.
 - Generates recommendations tied directly to observed evidence, not generic advice.
 
 **Evidence / Reliability Mechanisms**
 - Numeric and period grounding: every figure and named period in the AI's answer is checked against the actual tool evidence from that investigation.
 - Bounded recovery: if grounding fails, the model gets exactly one retry against the same evidence; if that also fails, a deterministic, evidence-only summary is shown instead of an unverified answer.
-- Signal ranking, confidence, and the "strongest signal" are pure functions over the evidence trace — the UI reads these directly rather than re-deriving its own version.
+- Signal ranking, confidence, and the "strongest signal" are pure functions over the evidence trace  the UI reads these directly rather than re-deriving its own version.
 
 ## Architecture
 
